@@ -40,6 +40,34 @@ Transport Services interfaces (verified against the IDL shipped with CTS
 Branch history note: earlier work on this tracker (below) was done against
 3.1; the items above bring it to 3.2.
 
+## CTS 3.2.3 self-test (2026-09-14)
+
+The official FACE Conformance Test Suite 3.2.3 distribution was downloaded
+(`cts/Linux_CTS_3.2.3_Distribution.zip`, gitignored, not committed). A
+FACE 3.2 C-language adapter was written over the library (`cts/adapter/`,
+local only): a C mapping layer for the `FACE::TSS::Base` API shape,
+`CTS_Factory_Functions.h` with `Get_FACE_TSS_Base()`, and adapter
+implementations of `Initialize` / `Create_Connection` /
+`Destroy_Connection` delegating to `face_tss_*`.
+
+Results:
+- The three official C interface tests for `FACE_TSS_Base`
+  (`conformanceInterfaceTests/C/TSS/Base/Base/test{1,2,3}.c`: Initialize,
+  Create_Connection, Destroy_Connection) **compile and link** against the
+  adapter. Per the CTS user manual this is the actual interface-conformance
+  check: the CTS builds these as executables that are never run - it only
+  tests that the UoC links with them.
+- A functional test driving the same FACE C API with real arguments
+  **passes**: Initialize (inline JSON config resource), Create_Connection
+  (valid id + max size), unknown name -> `INVALID_PARAM`, Destroy twice ->
+  `NO_ERROR` then `NO_ACTION`, and the 3.2 `RESOURCE_LIMIT_REACHED` value
+  present in the mapping.
+- Out of scope for this pass: the CTS GUI workflow (GSL generation, full
+  PDF conformance report), TypedTS interface tests (the CTS 3.2.3 C suite
+  ships none), and the CSP/TPM/marshalling suites (interfaces this UoC does
+  not implement). Formal certification remains with an approved
+  Verification Authority.
+
 ## What was aligned (face-followups branch)
 
 ### Primitive types (`types.h` / `src/face_tss/types.py`)
