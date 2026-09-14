@@ -1,8 +1,9 @@
 # FACE Conformance Tracker
 
-Branch: `face-conformance`. This document tracks how closely the TSS
-implementation matches the FACE Technical Standard v3.1 Transport Services
-interface, what was changed, and what remains.
+Branch: `face-followups` (follow-ups to `face-conformance`). This document
+tracks how closely the TSS implementation matches the FACE Technical
+Standard v3.1 Transport Services interface, what was changed, and what
+remains.
 
 > **Certification status: NOT CERTIFIED.** Interface-shape alignment is not
 > conformance. Formal FACE conformance requires the FACE Conformance Test
@@ -18,7 +19,9 @@ interface, what was changed, and what remains.
 - Renamed `BUFFER_TOO_SMALL` -> `DATA_BUFFER_TOO_SMALL` (standard name).
 - `HEADER_TYPE` projection: `instance_uid` / `source_uid` / `timestamp`.
 - `QoS_EVENT_TYPE` projection: fixed-capacity (8) list of QoS elements.
-  Currently always reported empty.
+  Each receive/callback reports one honest transport-observable element:
+  `message_age_ns` (receive time minus envelope send timestamp, clamped to
+  zero). No QoS policies are managed or enforced.
 - `MESSAGE_GUID_TYPE` (uint64) with `MESSAGE_GUID_INVALID = 0`.
 
 ### Operation signatures (`tss.h` / `src/face_tss/tss.py`)
@@ -43,9 +46,12 @@ interface, what was changed, and what remains.
   (message GUID + qualified type name + serializer/deserializer/finalizer),
   registration/lookup, typed send/receive with wire GUID checking, typed
   callback bridge.
-- Code generator: flat FlatBuffers `.fbs` table (scalar + string fields) ->
-  C value struct + codec + descriptor. Deterministic 63-bit FNV-1a message
-  GUID from the qualified type name.
+- Code generator: `.fbs` tables (scalar + string fields, nested tables,
+  scalar vectors, enums with integral backing types) -> C value struct +
+  codec + descriptor. Unions, vectors of tables/strings, nested vectors,
+  non-integral-backed enums, explicit field IDs, and unknown types are
+  rejected with a clear error. Deterministic 63-bit FNV-1a message GUID
+  from the qualified type name.
 - Generated + checked in: `c/generated/positionreport_typed.*`
   (`FaceTSS.PositionReport`, GUID `7542349876525629205`).
 - New CTest suite `c-typed` and `face_tss_typed_pubsub` demo.
@@ -57,7 +63,7 @@ interface, what was changed, and what remains.
 ## Verification (this branch, 2026-09-14)
 - CMake build: clean (only pre-existing flatcc sign-compare notes).
 - CTest: 5/5 suites pass (envelope, config, lifecycle, live, typed).
-- Python: 36/36 tests pass.
+- Python: 40/40 tests pass.
 - C untyped pub/sub across processes: late subscriber 17/20 (first 3 missed
   before dial completed - normal pub/sub behavior). Subscriber-first start
   order works (dials retry in the background); only pre-subscription messages
@@ -67,10 +73,6 @@ interface, what was changed, and what remains.
 - Python pub/sub across processes: 16/20 with new header fields.
 
 ## Partially implemented / known divergences
-- **Receive buffer semantics**: FACE `Receive_Message` takes a caller-owned
-  data buffer + `DATA_BUFFER_TOO_SMALL` when it doesn't fit. This
-  implementation still returns an allocated payload and raises/maps the code
-  only on the `min_message_size` / `max_message_size` checks.
 - **QoS**: the event carries one honest element per message
   (`message_age_ns`) on receive and callback paths. No QoS policy
   management, no staleness enforcement, no `MESSAGE_STALE` production —
@@ -90,16 +92,14 @@ interface, what was changed, and what remains.
 - **Codegen limits**: unions, vectors of tables/strings, nested vectors,
   and explicit field IDs are still rejected. Supported: multiple tables per
   file, nested tables, scalar vectors, enums with explicit integral base.
-- **Late subscriber**: a subscriber started before its publisher misses
-  early messages (verified pre-existing in the original code; README notes
-  the publisher-first ordering requirement).
+- **Late subscriber**: fixed — dials are non-blocking with background retry,
+  so start order no longer matters for connectivity. Messages sent before
+  the subscription propagates are still dropped (inherent pub/sub).
 - **Threading**: callback stop/destroy locking follows the original design;
   not audited against FACE threading requirements.
 
 ## Remaining gaps (not started)
-- FACE Configuration interface + `CONFIGURATION_RESOURCE` handling.
-- Caller-owned receive buffers (full `DATA_BUFFER_TOO_SMALL` semantics).
-- Real QoS management (policies, events, staleness).
+- Real QoS management (policies, staleness enforcement, MESSAGE_STALE).
 - TSS distribution / multi-instance discovery beyond static config.
 - Type abstraction beyond the codegen subset.
 - TPM support.
