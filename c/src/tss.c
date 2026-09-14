@@ -1,6 +1,8 @@
 /* FaceTss: the FACE TS interface. See tss.h for contract. */
 
 #include "face_tss/tss.h"
+#include "face_tss/typed.h"
+#include "tss_priv.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,12 +24,19 @@ typedef struct FACE_TSS_CONN {
     uint64_t send_seq;
     FACE_TSS_MESSAGE_CB cb;
     void *cb_user;
+    void (*cb_user_fini)(void *); /* cleanup for cb_user, may be NULL */
     void *cb_ctx; /* CB_CTX owned by this conn, freed on unregister/destroy */
 } FACE_TSS_CONN;
 
+/* Registered data types (FACE TypedTS type support). Fixed array; entries
+ * are never removed, so pointers handed out stay valid. */
+#define FACE_TSS_MAX_TYPES 32
+
 struct FACE_TSS {
     char instance_name[FACE_TSS_MAX_STRING];
-    FACE_TSS_GUID_TYPE source_id;
+    FACE_TSS_UID_TYPE source_id;
+    FACE_TSS_UID_TYPE next_instance_uid;      /* per-message instance UIDs */
+    FACE_TSS_TRANSACTION_ID_TYPE next_txn;    /* assigned transaction IDs */
 #if defined(_WIN32)
     CRITICAL_SECTION lock;
 #else
@@ -38,6 +47,8 @@ struct FACE_TSS {
     FACE_TSS_CONNECTION_ID_TYPE next_id;
     FACE_TSS_CONN **conns;      /* indexed by (id - 1), NULL when free */
     size_t conns_cap;
+    FACE_TSS_TYPE_SUPPORT types[FACE_TSS_MAX_TYPES];
+    size_t ntypes;
     FACE_TSS_STATS stats;
 };
 
@@ -98,7 +109,7 @@ static int64_t now_ns(void)
 #endif
 }
 
-static FACE_TSS_GUID_TYPE make_guid(void)
+static FACE_TSS_UID_TYPE make_guid(void)
 {
     uint64_t v = 0;
 #if defined(_WIN32)
@@ -122,7 +133,7 @@ static FACE_TSS_GUID_TYPE make_guid(void)
     }
 #endif
     v &= (uint64_t)0x7FFFFFFFFFFFFFFFULL; /* keep positive */
-    return (FACE_TSS_GUID_TYPE)(v ? v : 1);
+    return (FACE_TSS_UID_TYPE)(v ? v : 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -143,14 +154,18 @@ const char *face_tss_rc_str(FACE_TSS_RETURN_CODE rc)
     switch (rc) {
     case FACE_TSS_RC_NO_ERROR: return "NO_ERROR";
     case FACE_TSS_RC_NO_ACTION: return "NO_ACTION";
-    case FACE_TSS_RC_TIMED_OUT: return "TIMED_OUT";
+    case FACE_TSS_RC_NOT_AVAILABLE: return "NOT_AVAILABLE";
     case FACE_TSS_RC_INVALID_PARAM: return "INVALID_PARAM";
     case FACE_TSS_RC_INVALID_CONFIG: return "INVALID_CONFIG";
     case FACE_TSS_RC_INVALID_MODE: return "INVALID_MODE";
-    case FACE_TSS_RC_NOT_AVAILABLE: return "NOT_AVAILABLE";
-    case FACE_TSS_RC_CONNECTION_CLOSED: return "CONNECTION_CLOSED";
+    case FACE_TSS_RC_TIMED_OUT: return "TIMED_OUT";
+    case FACE_TSS_RC_ADDR_IN_USE: return "ADDR_IN_USE";
+    case FACE_TSS_RC_PERMISSION_DENIED: return "PERMISSION_DENIED";
     case FACE_TSS_RC_MESSAGE_STALE: return "MESSAGE_STALE";
-    case FACE_TSS_RC_BUFFER_TOO_SMALL: return "BUFFER_TOO_SMALL";
+    case FACE_TSS_RC_IN_PROGRESS: return "IN_PROGRESS";
+    case FACE_TSS_RC_CONNECTION_CLOSED: return "CONNECTION_CLOSED";
+    case FACE_TSS_RC_DATA_BUFFER_TOO_SMALL: return "DATA_BUFFER_TOO_SMALL";
+    case FACE_TSS_RC_DATA_OVERFLOW: return "DATA_OVERFLOW";
     default: return "UNKNOWN";
     }
 }
@@ -170,6 +185,8 @@ FACE_TSS *face_tss_create(const char *instance_name)
         strcpy(t->instance_name, "face-tss");
     }
     t->source_id = make_guid();
+    t->next_instance_uid = make_guid();
+    t->next_txn = 1;
     t->next_id = 1;
     face_tss_config_init(&t->config, t->instance_name);
     lock_init(t);
@@ -185,6 +202,11 @@ static void destroy_conn(FACE_TSS_CONN *c)
     face_tss_transport_close(c->transport);
     free(c->cb_ctx);
     c->cb_ctx = NULL;
+    if (c->cb_user_fini) {
+        c->cb_user_fini(c->cb_user);
+        c->cb_user_fini = NULL;
+    }
+    c->cb_user = NULL;
     free(c);
 }
 
@@ -240,9 +262,9 @@ FACE_TSS_RETURN_CODE face_tss_initialize(
     return FACE_TSS_RC_NO_ERROR;
 }
 
-FACE_TSS_GUID_TYPE face_tss_source_id(FACE_TSS *tss)
+FACE_TSS_UID_TYPE face_tss_source_id(FACE_TSS *tss)
 {
-    FACE_TSS_GUID_TYPE v = 0;
+    FACE_TSS_UID_TYPE v = 0;
     if (!tss)
         return 0;
     lock_take(tss);
@@ -259,6 +281,54 @@ FACE_TSS_RETURN_CODE face_tss_stats(FACE_TSS *tss, FACE_TSS_STATS *out)
     *out = tss->stats;
     lock_drop(tss);
     return FACE_TSS_RC_NO_ERROR;
+}
+
+/* ------------------------------------------------------------------ */
+/* typed type-support registry (see typed.c for the public operations) */
+/* ------------------------------------------------------------------ */
+
+FACE_TSS_RETURN_CODE face_tss_priv_typed_register(
+    FACE_TSS *tss, const FACE_TSS_TYPE_SUPPORT *tsupport)
+{
+    size_t i;
+    if (!tss || !tsupport || !tsupport->type_name[0] ||
+        !tsupport->serialize || !tsupport->deserialize || !tsupport->fini ||
+        tsupport->value_size == 0)
+        return FACE_TSS_RC_INVALID_PARAM;
+    lock_take(tss);
+    for (i = 0; i < tss->ntypes; i++) {
+        if (strcmp(tss->types[i].type_name, tsupport->type_name) == 0) {
+            lock_drop(tss);
+            return FACE_TSS_RC_NO_ACTION;
+        }
+    }
+    if (tss->ntypes >= FACE_TSS_MAX_TYPES) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    tss->types[tss->ntypes++] = *tsupport;
+    lock_drop(tss);
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+const FACE_TSS_TYPE_SUPPORT *face_tss_priv_typed_lookup(
+    FACE_TSS *tss, const char *type_name)
+{
+    size_t i;
+    const FACE_TSS_TYPE_SUPPORT *found = NULL;
+    if (!tss || !type_name)
+        return NULL;
+    lock_take(tss);
+    for (i = 0; i < tss->ntypes; i++) {
+        if (strcmp(tss->types[i].type_name, type_name) == 0) {
+            found = &tss->types[i];
+            break;
+        }
+    }
+    lock_drop(tss);
+    /* Entries are never removed and the array is fixed, so the pointer
+     * stays valid after the lock is released. */
+    return found;
 }
 
 /* ------------------------------------------------------------------ */
@@ -386,15 +456,17 @@ static int can_receive(const FACE_TSS_CONN *c)
 /* messaging                                                          */
 /* ------------------------------------------------------------------ */
 
-FACE_TSS_RETURN_CODE face_tss_send_message(
+FACE_TSS_RETURN_CODE face_tss_priv_send_guid(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
-    const uint8_t *payload, size_t payload_len,
-    FACE_TSS_TRANSACTION_ID_TYPE transaction_id)
+    FACE_TIMEOUT_TYPE timeout_ns,
+    FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
+    FACE_TSS_MESSAGE_GUID_TYPE message_guid,
+    const uint8_t *payload, size_t payload_len)
 {
     FACE_TSS_CONN *c;
     FACE_TSS_ENVELOPE env;
     FACE_TSS_RETURN_CODE rc;
-    if (!tss)
+    if (!tss || !transaction_id)
         return FACE_TSS_RC_INVALID_PARAM;
     if (payload_len > 0 && !payload)
         return FACE_TSS_RC_INVALID_PARAM;
@@ -415,19 +487,24 @@ FACE_TSS_RETURN_CODE face_tss_send_message(
     if ((FACE_TSS_MESSAGE_SIZE_TYPE)payload_len > c->cfg.max_message_size ||
         payload_len > (size_t)INT32_MAX) {
         lock_drop(tss);
-        return FACE_TSS_RC_BUFFER_TOO_SMALL;
+        return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
     }
+    /* inout transaction_id: assign one when the caller passes unspecified. */
+    if (*transaction_id == FACE_TSS_TRANSACTION_ID_UNSPECIFIED)
+        *transaction_id = tss->next_txn++;
     c->send_seq++;
     face_tss_envelope_init(&env);
     strncpy(env.connection_name, c->cfg.name, sizeof(env.connection_name) - 1);
-    env.transaction_id = transaction_id;
+    env.transaction_id = *transaction_id;
     env.source_id = tss->source_id;
     env.sequence_number = c->send_seq;
     env.timestamp_ns = now_ns();
+    env.instance_uid = tss->next_instance_uid++;
+    env.message_guid = message_guid;
     /* borrow caller bytes: encode copies into the builder, no copy here */
     env.payload = (uint8_t *)payload;
     env.payload_len = payload_len;
-    rc = face_tss_transport_send(c->transport, &env);
+    rc = face_tss_transport_send(c->transport, &env, timeout_ns);
     env.payload = NULL; /* not owned */
     env.payload_len = 0;
     if (rc == FACE_TSS_RC_NO_ERROR)
@@ -438,16 +515,26 @@ FACE_TSS_RETURN_CODE face_tss_send_message(
     return rc;
 }
 
+FACE_TSS_RETURN_CODE face_tss_send_message(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TIMEOUT_TYPE timeout_ns,
+    FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
+    const uint8_t *payload, size_t payload_len)
+{
+    return face_tss_priv_send_guid(tss, connection_id, timeout_ns,
+                                   transaction_id,
+                                   FACE_TSS_MESSAGE_GUID_UNSPECIFIED,
+                                   payload, payload_len);
+}
+
 static void envelope_to_message(const FACE_TSS_ENVELOPE *env, FACE_TSS_MESSAGE *msg)
 {
     memset(msg, 0, sizeof(*msg));
-    strncpy(msg->header.connection_name, env->connection_name,
-            sizeof(msg->header.connection_name) - 1);
-    msg->header.transaction_id = env->transaction_id;
-    msg->header.source_id = env->source_id;
-    msg->header.sequence_number = env->sequence_number;
-    msg->header.timestamp_ns = env->timestamp_ns;
-    msg->header.validity = FACE_TSS_VALID;
+    /* FACE::TSS::HEADER_TYPE: instance UID, source UID, timestamp. */
+    msg->header.instance_uid = env->instance_uid;
+    msg->header.source_uid = env->source_id;
+    msg->header.timestamp = env->timestamp_ns;
+    msg->message_guid = env->message_guid;
     if (env->payload_len > 0) {
         msg->payload = (uint8_t *)malloc(env->payload_len);
         if (msg->payload) {
@@ -460,13 +547,15 @@ static void envelope_to_message(const FACE_TSS_ENVELOPE *env, FACE_TSS_MESSAGE *
 FACE_TSS_RETURN_CODE face_tss_receive_message(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
     FACE_TIMEOUT_TYPE timeout_ns, size_t min_message_size,
-    FACE_TSS_MESSAGE *out)
+    FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
+    FACE_TSS_MESSAGE *msg_out,
+    FACE_TSS_QOS_EVENT *qos_out)
 {
     FACE_TSS_CONN *c;
     FACE_TSS_TRANSPORT *tr;
     FACE_TSS_RETURN_CODE rc;
     FACE_TSS_ENVELOPE env;
-    if (!tss || !out)
+    if (!tss || !transaction_id || !msg_out)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
     if (!tss->initialized) {
@@ -499,26 +588,32 @@ FACE_TSS_RETURN_CODE face_tss_receive_message(
     if (env.payload_len < min_message_size) {
         face_tss_envelope_fini(&env);
         lock_drop(tss);
-        return FACE_TSS_RC_BUFFER_TOO_SMALL;
+        return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
     }
-    envelope_to_message(&env, out);
+    envelope_to_message(&env, msg_out);
+    *transaction_id = env.transaction_id;
+    if (qos_out)
+        face_tss_qos_event_init(qos_out); /* no QoS policies yet */
     face_tss_envelope_fini(&env);
     tss->stats.received++;
     lock_drop(tss);
-    if (out->payload_len > 0 && !out->payload)
+    if (msg_out->payload_len > 0 && !msg_out->payload)
         return FACE_TSS_RC_NOT_AVAILABLE;
     return FACE_TSS_RC_NO_ERROR;
 }
 
 FACE_TSS_RETURN_CODE face_tss_try_receive(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
-    FACE_TSS_MESSAGE *out, bool *has_msg)
+    FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
+    FACE_TSS_MESSAGE *msg_out, FACE_TSS_QOS_EVENT *qos_out,
+    bool *has_msg)
 {
     FACE_TSS_RETURN_CODE rc;
     if (!has_msg)
         return FACE_TSS_RC_INVALID_PARAM;
     *has_msg = false;
-    rc = face_tss_receive_message(tss, connection_id, 0, 0, out);
+    rc = face_tss_receive_message(tss, connection_id, 0, 0,
+                                  transaction_id, msg_out, qos_out);
     if (rc == FACE_TSS_RC_TIMED_OUT)
         return FACE_TSS_RC_NO_ERROR;
     if (rc == FACE_TSS_RC_NO_ERROR)
@@ -544,9 +639,12 @@ static void cb_dispatch(const FACE_TSS_ENVELOPE *env, void *user)
     FACE_TSS_MESSAGE_CB cb = NULL;
     void *cb_user = NULL;
     FACE_TSS *tss = ctx->tss;
+    FACE_TSS_CONNECTION_ID_TYPE id = ctx->id;
+    FACE_TSS_QOS_EVENT qos;
+    FACE_TSS_RETURN_CODE cb_rc = FACE_TSS_RC_NO_ERROR;
     lock_take(tss);
     {
-        FACE_TSS_CONN *c = find_open(tss, ctx->id);
+        FACE_TSS_CONN *c = find_open(tss, id);
         if (c && c->cb) {
             cb = c->cb;
             cb_user = c->cb_user;
@@ -556,16 +654,19 @@ static void cb_dispatch(const FACE_TSS_ENVELOPE *env, void *user)
     lock_drop(tss);
     if (!cb)
         return;
-    /* NOTE: ctx is owned by the connection; freed on unregister/destroy.
-     * Track it in the conn to avoid the leak: store ctx pointer. */
+    /* NOTE: ctx is owned by the connection; freed on unregister/destroy. */
     envelope_to_message(env, &msg);
-    cb(&msg, cb_user);
+    face_tss_qos_event_init(&qos); /* no QoS policies yet */
+    cb(id, env->transaction_id, env->message_guid,
+       msg.payload, msg.payload_len,
+       &msg.header, &qos, cb_user, &cb_rc);
+    (void)cb_rc;
     face_tss_message_fini(&msg);
 }
 
-FACE_TSS_RETURN_CODE face_tss_register_callback(
+FACE_TSS_RETURN_CODE face_tss_priv_register_callback_ex(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
-    FACE_TSS_MESSAGE_CB cb, void *user)
+    FACE_TSS_MESSAGE_CB cb, void *user, void (*user_fini)(void *))
 {
     FACE_TSS_CONN *c;
     CB_CTX *ctx;
@@ -607,9 +708,18 @@ FACE_TSS_RETURN_CODE face_tss_register_callback(
     }
     c->cb = cb;
     c->cb_user = user;
+    c->cb_user_fini = user_fini;
     c->cb_ctx = ctx;
     lock_drop(tss);
     return FACE_TSS_RC_NO_ERROR;
+}
+
+FACE_TSS_RETURN_CODE face_tss_register_callback(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TSS_MESSAGE_CB cb, void *user)
+{
+    return face_tss_priv_register_callback_ex(tss, connection_id, cb, user,
+                                              NULL);
 }
 
 FACE_TSS_RETURN_CODE face_tss_unregister_callback(
@@ -634,6 +744,10 @@ FACE_TSS_RETURN_CODE face_tss_unregister_callback(
     }
     face_tss_transport_callback_stop(c->transport);
     c->cb = NULL;
+    if (c->cb_user_fini) {
+        c->cb_user_fini(c->cb_user);
+        c->cb_user_fini = NULL;
+    }
     c->cb_user = NULL;
     free(c->cb_ctx);
     c->cb_ctx = NULL;

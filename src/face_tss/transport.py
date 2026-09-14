@@ -108,7 +108,7 @@ class Transport:
         return sock
 
     # -- data path ------------------------------------------------------
-    def send(self, env: Envelope) -> None:
+    def send(self, env: Envelope, timeout_ns: int = TIMEOUT_INFINITE) -> None:
         raise NotImplementedError
 
     def receive(self, timeout_ns: int) -> Envelope:
@@ -178,10 +178,15 @@ class PubSubTransport(Transport):
             ) from exc
         self._socket = sock
 
-    def send(self, env: Envelope) -> None:
+    def send(self, env: Envelope, timeout_ns: int = TIMEOUT_INFINITE) -> None:
         sock = self._require()
+        sock.send_timeout = ns_to_ms(timeout_ns)
         try:
             sock.send(self._topic + encode_envelope(env))
+        except pynng.Timeout as exc:
+            raise TimedOutError(
+                f"connection {self.config.name}: send timed out"
+            ) from exc
         except Exception as exc:
             raise TransportError(
                 f"connection {self.config.name}: nng send failed: {exc}"
@@ -253,10 +258,15 @@ class BusTransport(Transport):
                 f"{self.config.address}: {exc}"
             ) from exc
 
-    def send(self, env: Envelope) -> None:
+    def send(self, env: Envelope, timeout_ns: int = TIMEOUT_INFINITE) -> None:
         sock = self._require()
+        sock.send_timeout = ns_to_ms(timeout_ns)
         try:
             sock.send(encode_envelope(env))
+        except pynng.Timeout as exc:
+            raise TimedOutError(
+                f"connection {self.config.name}: send timed out"
+            ) from exc
         except Exception as exc:
             raise TransportError(
                 f"connection {self.config.name}: nng send failed: {exc}"

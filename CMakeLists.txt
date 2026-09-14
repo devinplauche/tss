@@ -94,6 +94,7 @@ add_library(TSS SHARED
     c/src/envelope.c
     c/src/transport.c
     c/src/tss.c
+    c/src/typed.c
 )
 add_library(FaceTSS::TSS ALIAS TSS)
 

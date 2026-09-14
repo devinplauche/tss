@@ -12,6 +12,8 @@
  *   3  sequence_number : ulong
  *   4  timestamp_ns    : long
  *   5  payload         : [ubyte]  (opaque typed message bytes)
+ *   6  message_guid    : long     (FACE MESSAGE_GUID_TYPE; 0 = untyped)
+ *   7  instance_uid    : long     (FACE per-message instance UID)
  *
  * The typed payload is produced/consumed by application code; the TSS only
  * frames it. `face_tss_envelope_encode` serializes with the flatcc builder
@@ -28,9 +30,11 @@ extern "C" {
 typedef struct FACE_TSS_ENVELOPE {
     char connection_name[FACE_TSS_MAX_CONNECTION_NAME];
     FACE_TSS_TRANSACTION_ID_TYPE transaction_id;
-    FACE_TSS_GUID_TYPE source_id;
+    FACE_TSS_UID_TYPE source_id;
     uint64_t sequence_number;
     FACE_SYSTEM_TIME_TYPE timestamp_ns;
+    FACE_TSS_MESSAGE_GUID_TYPE message_guid; /* 0 = untyped payload */
+    FACE_TSS_UID_TYPE instance_uid;      /* per-message instance UID */
     uint8_t *payload;      /* owned bytes (malloc), NULL when empty */
     size_t payload_len;
 } FACE_TSS_ENVELOPE;

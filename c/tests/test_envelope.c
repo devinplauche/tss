@@ -2,6 +2,7 @@
  * defaults, unicode names, corrupt-input rejection. */
 #include "test.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "face_tss/envelope.h"
@@ -17,6 +18,8 @@ static FACE_TSS_ENVELOPE make_env(void)
     e.source_id = 123456789;
     e.sequence_number = 42;
     e.timestamp_ns = 1720000000000000000LL;
+    e.message_guid = 7542349876525629205LL;
+    e.instance_uid = 999000111;
     e.payload = (uint8_t *)malloc(sizeof(blob));
     memcpy(e.payload, blob, sizeof(blob));
     e.payload_len = sizeof(blob);
@@ -30,6 +33,8 @@ static void check_equal(const FACE_TSS_ENVELOPE *a, const FACE_TSS_ENVELOPE *b)
     CHECK(a->source_id == b->source_id);
     CHECK(a->sequence_number == b->sequence_number);
     CHECK(a->timestamp_ns == b->timestamp_ns);
+    CHECK(a->message_guid == b->message_guid);
+    CHECK(a->instance_uid == b->instance_uid);
     CHECK(a->payload_len == b->payload_len);
     CHECK(a->payload_len == 0 ||
           memcmp(a->payload, b->payload, a->payload_len) == 0);

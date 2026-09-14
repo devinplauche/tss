@@ -39,17 +39,18 @@ def run_peer(name: str, count: int = 5) -> None:
     def _rx() -> None:
         while not stop.is_set():
             try:
-                msg = tss.receive_message(conn_id, timeout_ns=200_000_000)
+                msg, txn, _qos = tss.receive_message(conn_id,
+                                                     timeout_ns=200_000_000)
             except TimedOutError:
                 continue
-            print(f"[{name}] got {msg.payload.decode()} (txn={msg.header.transaction_id})")
+            print(f"[{name}] got {msg.payload.decode()} (txn={txn})")
 
     rx = threading.Thread(target=_rx, daemon=True)
     rx.start()
     time.sleep(1.0)  # let the mesh settle
     for i in range(1, count + 1):
         body = f"ping-{name}-{i}".encode()
-        tss.send_message(conn_id, body, transaction_id=i)
+        tss.send_message(conn_id, body, 5_000_000_000, transaction_id=i)
         print(f"[{name}] sent {body.decode()}")
         time.sleep(0.5)
     time.sleep(1.0)  # drain inbound

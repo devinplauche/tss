@@ -48,8 +48,9 @@ def run_publisher(config_path: Path, count: int = 20) -> None:
             heading_deg=(90.0 + i * 5) % 360,
             valid=True,
         )
-        tss.send_message(conn_id, report.serialize(), transaction_id=i + 1)
-        print(f"[pub] sent seq={i + 1} lat={report.latitude_deg:.4f}")
+        tss.send_message(conn_id, report.serialize(), 5_000_000_000,
+                         transaction_id=i + 1)
+        print(f"[pub] sent txn={i + 1} lat={report.latitude_deg:.4f}")
         time.sleep(0.2)
     tss.destroy_connection(conn_id)
     tss.finalize()
@@ -66,14 +67,14 @@ def run_subscriber(config_path: Path, timeout_s: float = 15.0) -> None:
     received = 0
     while time.time() < deadline:
         try:
-            msg = tss.receive_message(conn_id, timeout_ns=500_000_000)
+            msg, txn, _qos = tss.receive_message(conn_id, timeout_ns=500_000_000)
         except TimedOutError:
             continue
         report = PositionReport.deserialize(msg.payload)
         received += 1
         h = msg.header
         print(
-            f"[sub] #{received} txn={h.transaction_id} seq={h.sequence_number} "
+            f"[sub] #{received} txn={txn} iuid={h.instance_uid} "
             f"vehicle={report.vehicle_id} lat={report.latitude_deg:.4f} "
             f"lon={report.longitude_deg:.4f} alt={report.altitude_m:.0f}"
         )

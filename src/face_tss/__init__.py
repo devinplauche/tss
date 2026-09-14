@@ -11,8 +11,8 @@ from .config import (
 )
 from .envelope import Envelope, decode_envelope, encode_envelope
 from .errors import (
-    BufferTooSmallError,
     ConnectionClosedError,
+    DataBufferTooSmallError,
     FaceTssError,
     InvalidConfigError,
     InvalidModeError,
@@ -23,15 +23,25 @@ from .errors import (
     TransportError,
 )
 from .transport import BusTransport, PubSubTransport, open_transport
-from .tss import ConnectionId, FaceTss, ReceivedMessage, TransactionId, TssStats
+from .tss import (
+    ConnectionId,
+    FaceTss,
+    MessageGuid,
+    ReceivedMessage,
+    TransactionId,
+    TssStats,
+)
 from .typed import PositionReport, TypedMessage
 from .types import (
     CONNECTION_ID_INVALID,
+    MESSAGE_GUID_INVALID,
     TIMEOUT_INFINITE,
     TRANSACTION_ID_UNSPECIFIED,
     Direction,
     Header,
     MessageValidity,
+    QosElement,
+    QosEvent,
     ReturnCode,
     now_ns,
 )
@@ -48,7 +58,7 @@ __all__ = [
     "decode_envelope",
     "encode_envelope",
     "FaceTssError",
-    "BufferTooSmallError",
+    "DataBufferTooSmallError",
     "ConnectionClosedError",
     "InvalidConfigError",
     "InvalidModeError",
@@ -62,17 +72,21 @@ __all__ = [
     "open_transport",
     "ConnectionId",
     "FaceTss",
+    "MessageGuid",
     "ReceivedMessage",
     "TransactionId",
     "TssStats",
     "PositionReport",
     "TypedMessage",
     "CONNECTION_ID_INVALID",
+    "MESSAGE_GUID_INVALID",
     "TIMEOUT_INFINITE",
     "TRANSACTION_ID_UNSPECIFIED",
     "Direction",
     "Header",
     "MessageValidity",
+    "QosElement",
+    "QosEvent",
     "ReturnCode",
     "now_ns",
 ]

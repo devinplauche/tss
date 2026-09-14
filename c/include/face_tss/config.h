@@ -13,9 +13,9 @@
  * - role: which end of the socket this instance owns. For pubsub one side
  *   must be publisher and the other subscriber; for bus both sides use bus.
  * - max_message_size: largest typed payload accepted; larger sends fail
- *   with FACE_TSS_RC_BUFFER_TOO_SMALL.
+ *   with FACE_TSS_RC_DATA_BUFFER_TOO_SMALL.
  *
- * Configs are plain text (see configs/*.json) parsed with a small built-in
+ * Configs are plain text (see configs dir, *.json) parsed with a small built-in
  * JSON reader, or built programmatically with face_tss_config_add().
  */
 

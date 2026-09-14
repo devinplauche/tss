@@ -70,7 +70,7 @@ static FACE_TSS_RETURN_CODE open_socket(
             rv = nng_listen(s, cfg->address, NULL, 0);
             if (rv != 0) {
                 nng_close(s);
-                return (rv == NNG_EADDRINUSE) ? FACE_TSS_RC_INVALID_CONFIG
+                return (rv == NNG_EADDRINUSE) ? FACE_TSS_RC_ADDR_IN_USE
                                               : FACE_TSS_RC_NOT_AVAILABLE;
             }
         } else {
@@ -169,7 +169,8 @@ void face_tss_transport_close(FACE_TSS_TRANSPORT *t)
 }
 
 FACE_TSS_RETURN_CODE face_tss_transport_send(
-    FACE_TSS_TRANSPORT *t, const FACE_TSS_ENVELOPE *env)
+    FACE_TSS_TRANSPORT *t, const FACE_TSS_ENVELOPE *env,
+    FACE_TIMEOUT_TYPE timeout_ns)
 {
     uint8_t *body = NULL;
     size_t body_len = 0;
@@ -196,7 +197,18 @@ FACE_TSS_RETURN_CODE face_tss_transport_send(
     body = NULL;
     if (rv != 0)
         goto fail;
+    /* Bound the blocking time per the FACE Send_Message timeout. */
+    rv = nng_socket_set_ms(
+        t->sock, NNG_OPT_SENDTIMEO, (nng_duration)ns_to_ms(timeout_ns));
+    if (rv != 0)
+        goto fail;
     rv = nng_sendmsg(t->sock, msg, 0);
+    /* Restore non-blocking sends for the callback/poll paths. */
+    nng_socket_set_ms(t->sock, NNG_OPT_SENDTIMEO, NNG_DURATION_ZERO);
+    if (rv == NNG_ETIMEDOUT) {
+        nng_msg_free(msg);
+        return FACE_TSS_RC_TIMED_OUT;
+    }
     if (rv != 0) {
         nng_msg_free(msg);
         return FACE_TSS_RC_NOT_AVAILABLE;

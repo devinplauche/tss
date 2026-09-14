@@ -1,6 +1,6 @@
 """FlatBuffers TSS envelope codec (hand-rolled, no flatc step).
 
-Wire schema (see ``schemas/tss_envelope.fbs``), field slots are fixed:
+Wire schema (see ``c/schemas/tss_envelope.fbs``), field slots are fixed:
 
     slot 0  connection_name : string
     slot 1  transaction_id  : long
@@ -8,11 +8,15 @@ Wire schema (see ``schemas/tss_envelope.fbs``), field slots are fixed:
     slot 3  sequence_number : ulong
     slot 4  timestamp_ns    : long
     slot 5  payload         : [ubyte]  (opaque typed message bytes)
+    slot 6  message_guid    : ulong    (application type identity)
+    slot 7  instance_uid    : ulong    (unique per send, per TSS instance)
 
-The typed payload is produced/consumed by generated FlatBuffers code for the
-application's own schema; the TSS never interprets it, it only frames it.
-``encode``/``decode`` use the ``flatbuffers`` runtime directly (Builder for
-writing, Table for reading) so there is no ``flatc`` build dependency.
+Slots 6-7 carry the FACE 3.1 header identity fields; slots 0-5 preserve the
+original layout. The typed payload is produced/consumed by generated
+FlatBuffers code for the application's own schema; the TSS never
+interprets it, it only frames it. ``encode``/``decode`` use the
+``flatbuffers`` runtime directly (Builder for writing, Table for reading)
+so there is no ``flatc`` build dependency.
 """
 
 from __future__ import annotations
@@ -34,6 +38,8 @@ ENVELOPE_SLOTS = {
     "sequence_number": 3,
     "timestamp_ns": 4,
     "payload": 5,
+    "message_guid": 6,
+    "instance_uid": 7,
 }
 
 
@@ -49,19 +55,23 @@ class Envelope:
     sequence_number: int
     timestamp_ns: int
     payload: bytes
+    message_guid: int = 0
+    instance_uid: int = 0
 
 
 def encode_envelope(env: Envelope) -> bytes:
     """Serialize an envelope to FlatBuffers bytes ready for nng send.
 
     NOTE: the Builder's ``*Slot`` writers take the plain field index
-    (0..5); only the Table *readers* use vtable offsets (4 + 2*slot).
+    (0..7); only the Table *readers* use vtable offsets (4 + 2*slot).
     """
     builder = flatbuffers.Builder(256)
     name_off = builder.CreateString(env.connection_name)
     payload_off = builder.CreateByteVector(bytes(env.payload))
-    builder.StartObject(6)
+    builder.StartObject(8)
     # Prepend in reverse field order (highest slot first).
+    builder.PrependUint64Slot(7, int(env.instance_uid), 0)
+    builder.PrependUint64Slot(6, int(env.message_guid), 0)
     builder.PrependUOffsetTRelativeSlot(5, payload_off, 0)
     builder.PrependInt64Slot(4, int(env.timestamp_ns), 0)
     builder.PrependUint64Slot(3, int(env.sequence_number), 0)
@@ -102,6 +112,9 @@ def decode_envelope(buf: bytes | bytearray | memoryview) -> Envelope:
             raise ValueError("envelope payload range is corrupt")
         payload = bytes(tab.Bytes[start : start + length])
 
+    message_guid = int(tab.GetSlot(_voff(6), 0, N.Uint64Flags))
+    instance_uid = int(tab.GetSlot(_voff(7), 0, N.Uint64Flags))
+
     return Envelope(
         connection_name=connection_name,
         transaction_id=transaction_id,
@@ -109,4 +122,6 @@ def decode_envelope(buf: bytes | bytearray | memoryview) -> Envelope:
         sequence_number=sequence_number,
         timestamp_ns=timestamp_ns,
         payload=payload,
+        message_guid=message_guid,
+        instance_uid=instance_uid,
     )

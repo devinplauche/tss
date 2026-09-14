@@ -5,6 +5,19 @@ Destroy_Connection / Send_Message / Receive_Message / Register_Callback /
 Unregister_Callback - with data movement provided by nng sockets and framing
 provided by FlatBuffers envelopes (see :mod:`face_tss.envelope`).
 
+API shape follows FACE 3.1:
+
+* ``send_message`` takes a timeout and an in/out transaction id: pass
+  ``TRANSACTION_ID_UNSPECIFIED`` (0) and the TSS assigns one; the id used
+  is returned.
+* ``receive_message`` returns ``(ReceivedMessage, transaction_id, qos)``
+  where ``qos`` is a :class:`QosEvent` (currently empty).
+* Callbacks receive ``(connection_id, transaction_id, message_guid,
+  payload, header, qos, context)`` and return a :class:`ReturnCode`.
+* Each message carries a FACE ``HEADER_TYPE`` projection
+  (``instance_uid`` / ``source_uid`` / ``timestamp``) plus a message GUID
+  identifying the application type.
+
 Connection model (one FACE connection = one nng socket, see transport.py):
 
 * SOURCE        - may only Send_Message.
@@ -12,10 +25,7 @@ Connection model (one FACE connection = one nng socket, see transport.py):
 * BI_DIRECTIONAL - may do both.
 
 IDs: Create_Connection returns increasing ints starting at 1 (0 is reserved
-as CONNECTION_ID_INVALID). Transaction IDs pass through untouched for
-request/reply correlation; the TSS stamps source_id (random per-instance
-GUID), per-connection sequence numbers, and a send timestamp on every
-outgoing envelope.
+as CONNECTION_ID_INVALID).
 
 Threading: one RLock guards all connection-table and sequence mutations.
 Transports are used under that lock for table/sequence consistency; the nng
@@ -33,8 +43,8 @@ from typing import Callable
 from .config import ConnectionConfig, TssConfig, normalize_name
 from .envelope import Envelope
 from .errors import (
-    BufferTooSmallError,
     ConnectionClosedError,
+    DataBufferTooSmallError,
     FaceTssError,
     InvalidModeError,
     InvalidParamError,
@@ -44,10 +54,13 @@ from .errors import (
 from .transport import CallbackHandle, Transport, open_transport
 from .types import (
     CONNECTION_ID_INVALID,
+    MESSAGE_GUID_INVALID,
     TIMEOUT_INFINITE,
+    TRANSACTION_ID_UNSPECIFIED,
     Direction,
     Header,
     MessageValidity,
+    QosEvent,
     ReturnCode,
     now_ns,
 )
@@ -57,6 +70,14 @@ TIMEOUT_INFINITE = TIMEOUT_INFINITE
 
 ConnectionId = int
 TransactionId = int
+MessageGuid = int
+
+#: Callback signature: (connection_id, transaction_id, message_guid,
+#: payload, header, qos, context) -> ReturnCode.
+MessageCallback = Callable[
+    [ConnectionId, TransactionId, MessageGuid, bytes, Header, QosEvent, object],
+    ReturnCode,
+]
 
 
 @dataclass
@@ -65,6 +86,7 @@ class ReceivedMessage:
 
     payload: bytes
     header: Header
+    message_guid: MessageGuid = MESSAGE_GUID_INVALID
     validity: MessageValidity = MessageValidity.VALID
 
 
@@ -74,7 +96,8 @@ class _Connection:
     transport: Transport
     closed: bool = False
     send_seq: int = 0
-    callback: Callable[[ReceivedMessage], None] | None = None
+    callback: MessageCallback | None = None
+    callback_context: object = None
     callback_handle: CallbackHandle | None = None
 
 
@@ -93,6 +116,8 @@ class FaceTss:
     def __init__(self, instance_name: str = "face-tss") -> None:
         self._instance_name = instance_name
         self._source_id = random.getrandbits(63)
+        self._instance_uid = random.getrandbits(63)
+        self._txn_counter = itertools.count(1)
         self._lock = threading.RLock()
         self._initialized = False
         self._config = TssConfig(instance_name=instance_name)
@@ -183,6 +208,7 @@ class FaceTss:
                 pass
             conn.callback_handle = None
         conn.callback = None
+        conn.callback_context = None
         try:
             conn.transport.close()
         except Exception:
@@ -197,12 +223,16 @@ class FaceTss:
         self,
         connection_id: ConnectionId,
         payload: bytes | bytearray | memoryview,
-        transaction_id: int = 0,
+        timeout_ns: int = TIMEOUT_INFINITE,
+        transaction_id: int = TRANSACTION_ID_UNSPECIFIED,
+        message_guid: MessageGuid = MESSAGE_GUID_INVALID,
     ) -> int:
         """FACE::TS::Send_Message. Returns the transaction id used.
 
+        Pass ``TRANSACTION_ID_UNSPECIFIED`` (0) to have the TSS assign one.
         Raises InvalidModeError on receive-only connections,
-        BufferTooSmallError when the payload exceeds max_message_size.
+        DataBufferTooSmallError when the payload exceeds max_message_size,
+        TimedOutError when the send timeout expires.
         """
         data = bytes(payload)
         with self._lock:
@@ -212,20 +242,28 @@ class FaceTss:
                     f"connection {conn.config.name} is DESTINATION-only"
                 )
             if len(data) > conn.config.max_message_size:
-                raise BufferTooSmallError(
+                raise DataBufferTooSmallError(
                     f"payload {len(data)} > max {conn.config.max_message_size}"
                 )
+            txn = (
+                int(transaction_id)
+                if transaction_id != TRANSACTION_ID_UNSPECIFIED
+                else next(self._txn_counter)
+            )
             conn.send_seq += 1
+            instance_uid = (self._instance_uid + conn.send_seq) & ((1 << 63) - 1)
             env = Envelope(
                 connection_name=conn.config.name,
-                transaction_id=int(transaction_id),
+                transaction_id=txn,
                 source_id=self._source_id,
                 sequence_number=conn.send_seq,
                 timestamp_ns=now_ns(),
                 payload=data,
+                message_guid=int(message_guid),
+                instance_uid=instance_uid,
             )
             try:
-                conn.transport.send(env)
+                conn.transport.send(env, timeout_ns)
             except FaceTssError:
                 self._stats.send_errors += 1
                 raise
@@ -233,7 +271,7 @@ class FaceTss:
                 self._stats.send_errors += 1
                 raise FaceTssError(ReturnCode.NO_ACTION, f"send failed: {exc}") from exc
             self._stats.sent += 1
-            return int(transaction_id)
+            return txn
 
     # -- messaging: Receive_Message ---------------------------------------
     def receive_message(
@@ -241,13 +279,13 @@ class FaceTss:
         connection_id: ConnectionId,
         timeout_ns: int = TIMEOUT_INFINITE,
         min_message_size: int = 0,
-        transaction_id: int = 0,
-    ) -> ReceivedMessage:
+    ) -> tuple[ReceivedMessage, TransactionId, QosEvent]:
         """FACE::TS::Receive_Message - block up to timeout for one message.
 
-        Raises TimedOutError (FACE TIMED_OUT) on timeout, InvalidModeError on
-        send-only connections, BufferTooSmallError if the payload is smaller
-        than ``min_message_size`` (FACE buffer-too-small semantics).
+        Returns ``(message, transaction_id, qos_event)``. Raises
+        TimedOutError (FACE TIMED_OUT) on timeout, InvalidModeError on
+        send-only connections, DataBufferTooSmallError if the payload is
+        smaller than ``min_message_size`` (FACE buffer-too-small semantics).
         """
         with self._lock:
             conn = self._require_open(connection_id)
@@ -261,25 +299,28 @@ class FaceTss:
                 self._stats.receive_timeouts += 1
                 raise
             if len(env.payload) < min_message_size:
-                raise BufferTooSmallError(
+                raise DataBufferTooSmallError(
                     f"payload {len(env.payload)} < required {min_message_size}"
                 )
             self._stats.received += 1
-            void = transaction_id  # kept for signature parity with FACE API
-            del void
-            return ReceivedMessage(
+            msg = ReceivedMessage(
                 payload=env.payload,
                 header=Header(
-                    connection_name=env.connection_name,
-                    transaction_id=env.transaction_id,
-                    source_id=env.source_id,
-                    sequence_number=env.sequence_number,
-                    timestamp_ns=env.timestamp_ns,
+                    instance_uid=env.instance_uid,
+                    source_uid=env.source_id,
+                    timestamp=env.timestamp_ns,
                 ),
+                message_guid=env.message_guid,
             )
+            return msg, int(env.transaction_id), QosEvent()
 
-    def try_receive(self, connection_id: ConnectionId) -> ReceivedMessage | None:
-        """Non-blocking receive; returns None instead of raising TimedOutError."""
+    def try_receive(
+        self, connection_id: ConnectionId
+    ) -> tuple[ReceivedMessage, TransactionId, QosEvent] | None:
+        """Non-blocking receive; returns None instead of raising TimedOutError.
+
+        Explicit extension beyond the FACE interface, kept for convenience.
+        """
         try:
             return self.receive_message(connection_id, timeout_ns=0)
         except TimedOutError:
@@ -289,9 +330,15 @@ class FaceTss:
     def register_callback(
         self,
         connection_id: ConnectionId,
-        callback: Callable[[ReceivedMessage], None],
+        callback: MessageCallback,
+        context: object = None,
     ) -> ReturnCode:
-        """FACE::TS::Register_Callback - deliver messages on a bg thread."""
+        """FACE::TS::Register_Callback - deliver messages on a bg thread.
+
+        The callback receives ``(connection_id, transaction_id,
+        message_guid, payload, header, qos, context)`` and returns a
+        ReturnCode; exceptions are swallowed and count as NO_ACTION.
+        """
         if not callable(callback):
             raise InvalidParamError("callback must be callable")
         with self._lock:
@@ -303,23 +350,31 @@ class FaceTss:
             if conn.callback is not None:
                 return ReturnCode.NO_ACTION
             conn.callback = callback
+            conn.callback_context = context
 
             def _dispatch(env: Envelope) -> None:
-                msg = ReceivedMessage(
-                    payload=env.payload,
-                    header=Header(
-                        connection_name=env.connection_name,
-                        transaction_id=env.transaction_id,
-                        source_id=env.source_id,
-                        sequence_number=env.sequence_number,
-                        timestamp_ns=env.timestamp_ns,
-                    ),
+                header = Header(
+                    instance_uid=env.instance_uid,
+                    source_uid=env.source_id,
+                    timestamp=env.timestamp_ns,
                 )
                 with self._lock:
                     live = self._connections.get(connection_id)
                     cb = live.callback if live is not None else None
+                    ctx = live.callback_context if live is not None else None
                 if cb is not None:
-                    cb(msg)
+                    try:
+                        cb(
+                            connection_id,
+                            int(env.transaction_id),
+                            int(env.message_guid),
+                            env.payload,
+                            header,
+                            QosEvent(),
+                            ctx,
+                        )
+                    except Exception:
+                        pass
                 with self._lock:
                     self._stats.received += 1
 
@@ -339,6 +394,7 @@ class FaceTss:
                     pass
                 conn.callback_handle = None
             conn.callback = None
+            conn.callback_context = None
             return ReturnCode.NO_ERROR
 
     # -- internals ---------------------------------------------------------

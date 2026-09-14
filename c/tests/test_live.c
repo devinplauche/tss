@@ -1,15 +1,18 @@
 /* Live data-movement tests over real nng sockets (loopback).
  *
- * - pubsub fan-out: publisher TSS -> subscriber TSS, payload + header
- *   intact, sequence numbers increasing, timed-out poll -> TIMED_OUT.
+ * - pubsub fan-out: publisher TSS -> subscriber TSS, payload + FACE header
+ *   intact, transaction-id inout honored, timed-out poll -> TIMED_OUT.
  * - bus mesh: listen anchor + dialer exchange.
- * - buffer-too-small: oversize send rejected before touching the wire.
+ * - data-buffer-too-small: oversize send rejected before touching the wire.
  * - callback: Register_Callback delivers without polling.
  * - topic isolation at the transport level (BBB frames never arrive on an
  *   AAA subscription).
+ * - conformance: header carries instance_uid/source_uid/timestamp;
+ *   transaction IDs pass through; QoS events are empty.
  */
 #include "test.h"
 
+#include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
 #include <windows.h>
@@ -68,7 +71,10 @@ static void t_pubsub_round_trip(void)
     FACE_TSS *pub, *sub;
     FACE_TSS_CONNECTION_ID_TYPE pid, sid;
     FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn;
+    FACE_TSS_QOS_EVENT qos;
     FACE_TSS_MESSAGE m;
+    FACE_TSS_UID_TYPE first_iuid;
     static const uint8_t hello[] = { 'h', 'e', 'l', 'l', 'o', 0, 255 };
     TEST_BEGIN("pubsub_round_trip");
     addr(a);
@@ -85,25 +91,39 @@ static void t_pubsub_round_trip(void)
     CHECK_RC(face_tss_create_connection(sub, "POSITION", &sid, &mx, 0),
              FACE_TSS_RC_NO_ERROR);
     msleep(400);
-    CHECK_RC(face_tss_send_message(pub, pid, hello, sizeof(hello), 11),
+    txn = 11;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn, hello,
+                                   sizeof(hello)),
              FACE_TSS_RC_NO_ERROR);
+    CHECK(txn == 11); /* explicit txn passes through (inout) */
     memset(&m, 0, sizeof(m));
-    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &m),
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      &qos),
              FACE_TSS_RC_NO_ERROR);
     CHECK(m.payload_len == sizeof(hello));
     CHECK(memcmp(m.payload, hello, sizeof(hello)) == 0);
-    CHECK(m.header.transaction_id == 11);
-    CHECK(strcmp(m.header.connection_name, "POSITION") == 0);
-    CHECK(m.header.sequence_number == 1);
-    CHECK(m.header.timestamp_ns > 0);
-    CHECK(m.header.source_id == face_tss_source_id(pub));
+    CHECK(txn == 11); /* inout transaction_id written back */
+    CHECK(m.message_guid == FACE_TSS_MESSAGE_GUID_UNSPECIFIED);
+    /* FACE HEADER_TYPE: instance UID, source UID, timestamp. */
+    CHECK(m.header.instance_uid != 0);
+    CHECK(m.header.source_uid == face_tss_source_id(pub));
+    CHECK(m.header.timestamp > 0);
+    CHECK(qos.count == 0); /* no QoS policies yet */
+    first_iuid = m.header.instance_uid;
     face_tss_message_fini(&m);
-    CHECK_RC(face_tss_send_message(pub, pid, (const uint8_t *)"second", 6, 12),
+    txn = FACE_TSS_TRANSACTION_ID_UNSPECIFIED;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"second", 6),
              FACE_TSS_RC_NO_ERROR);
+    CHECK(txn != FACE_TSS_TRANSACTION_ID_UNSPECIFIED); /* TSS assigned one */
     memset(&m, 0, sizeof(m));
-    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &m),
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      NULL),
              FACE_TSS_RC_NO_ERROR);
-    CHECK(m.header.sequence_number == 2);
+    CHECK(m.header.instance_uid != 0);
+    CHECK(m.header.instance_uid != first_iuid); /* UIDs unique per message */
     face_tss_message_fini(&m);
     face_tss_destroy(pub);
     face_tss_destroy(sub);
@@ -119,6 +139,7 @@ static void t_timeout(void)
     FACE_TSS *pub, *sub;
     FACE_TSS_CONNECTION_ID_TYPE pid, sid;
     FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn = 0;
     FACE_TSS_MESSAGE m;
     bool has = true;
     TEST_BEGIN("receive_timeout");
@@ -137,9 +158,10 @@ static void t_timeout(void)
              FACE_TSS_RC_NO_ERROR);
     msleep(300);
     memset(&m, 0, sizeof(m));
-    CHECK(face_tss_receive_message(sub, sid, 200 * 1000000LL, 0, &m) ==
-          FACE_TSS_RC_TIMED_OUT);
-    CHECK_RC(face_tss_try_receive(sub, sid, &m, &has), FACE_TSS_RC_NO_ERROR);
+    CHECK(face_tss_receive_message(sub, sid, 200 * 1000000LL, 0, &txn, &m,
+                                   NULL) == FACE_TSS_RC_TIMED_OUT);
+    CHECK_RC(face_tss_try_receive(sub, sid, &txn, &m, NULL, &has),
+             FACE_TSS_RC_NO_ERROR);
     CHECK(!has);
     face_tss_destroy(pub);
     face_tss_destroy(sub);
@@ -214,6 +236,7 @@ static void t_bus_exchange(void)
     FACE_TSS *ta, *tb;
     FACE_TSS_CONNECTION_ID_TYPE aid, bid;
     FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn;
     FACE_TSS_MESSAGE m;
     TEST_BEGIN("bus_exchange");
     addr(a);
@@ -230,15 +253,18 @@ static void t_bus_exchange(void)
     CHECK_RC(face_tss_create_connection(tb, "cmd", &bid, &mx, 0),
              FACE_TSS_RC_NO_ERROR);
     msleep(600);
-    CHECK_RC(face_tss_send_message(ta, aid, (const uint8_t *)"hello-from-a",
-                                   12, 1),
+    txn = 1;
+    CHECK_RC(face_tss_send_message(ta, aid, 5000000000LL, &txn,
+                                   (const uint8_t *)"hello-from-a", 12),
              FACE_TSS_RC_NO_ERROR);
     memset(&m, 0, sizeof(m));
-    CHECK_RC(face_tss_receive_message(tb, bid, 5000000000LL, 0, &m),
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(tb, bid, 5000000000LL, 0, &txn, &m,
+                                      NULL),
              FACE_TSS_RC_NO_ERROR);
     CHECK(m.payload_len == 12);
     CHECK(memcmp(m.payload, "hello-from-a", 12) == 0);
-    CHECK(m.header.transaction_id == 1);
+    CHECK(txn == 1);
     face_tss_message_fini(&m);
     face_tss_destroy(ta);
     face_tss_destroy(tb);
@@ -255,6 +281,7 @@ static void t_oversize(void)
     FACE_TSS *t;
     FACE_TSS_CONNECTION_ID_TYPE id;
     FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn = 0;
     TEST_BEGIN("oversize_rejected");
     addr(a);
     memset(&c, 0, sizeof(c));
@@ -272,9 +299,11 @@ static void t_oversize(void)
     CHECK_RC(face_tss_create_connection(t, "c", &id, &mx, 0),
              FACE_TSS_RC_NO_ERROR);
     CHECK(mx == 8);
-    CHECK(face_tss_send_message(t, id, (const uint8_t *)"012345678", 9, 0) ==
-          FACE_TSS_RC_BUFFER_TOO_SMALL);
-    CHECK_RC(face_tss_send_message(t, id, (const uint8_t *)"01234567", 8, 0),
+    CHECK(face_tss_send_message(t, id, 0, &txn,
+                                (const uint8_t *)"012345678", 9) ==
+          FACE_TSS_RC_DATA_BUFFER_TOO_SMALL);
+    CHECK_RC(face_tss_send_message(t, id, 0, &txn,
+                                   (const uint8_t *)"01234567", 8),
              FACE_TSS_RC_NO_ERROR);
     face_tss_destroy(t);
     face_tss_config_fini(&cfg);
@@ -283,15 +312,28 @@ static void t_oversize(void)
 
 typedef struct { volatile int n; char last[64]; size_t last_len; } cb_state_t;
 
-static void on_msg(const FACE_TSS_MESSAGE *m, void *user)
+static void on_msg(FACE_TSS_CONNECTION_ID_TYPE id,
+                   FACE_TSS_TRANSACTION_ID_TYPE txn,
+                   FACE_TSS_MESSAGE_GUID_TYPE guid,
+                   const uint8_t *payload, size_t payload_len,
+                   const FACE_TSS_HEADER *header,
+                   const FACE_TSS_QOS_EVENT *qos,
+                   void *user,
+                   FACE_TSS_RETURN_CODE *return_code)
 {
     cb_state_t *s = (cb_state_t *)user;
-    size_t n = m->payload_len < sizeof(s->last) - 1 ? m->payload_len
-                                                    : sizeof(s->last) - 1;
-    memcpy(s->last, m->payload, n);
+    size_t n = payload_len < sizeof(s->last) - 1 ? payload_len
+                                                 : sizeof(s->last) - 1;
+    (void)id;
+    (void)txn;
+    (void)guid;
+    (void)header;
+    (void)qos;
+    memcpy(s->last, payload, n);
     s->last[n] = '\0';
-    s->last_len = m->payload_len;
+    s->last_len = payload_len;
     s->n++;
+    *return_code = FACE_TSS_RC_NO_ERROR;
 }
 
 static void t_callback(void)
@@ -301,6 +343,7 @@ static void t_callback(void)
     FACE_TSS *pub, *sub;
     FACE_TSS_CONNECTION_ID_TYPE pid, sid;
     FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn = 0;
     cb_state_t st;
     int waited = 0;
     TEST_BEGIN("callback_delivery");
@@ -323,8 +366,8 @@ static void t_callback(void)
     CHECK_RC(face_tss_register_callback(sub, sid, on_msg, &st),
              FACE_TSS_RC_NO_ACTION);
     msleep(300);
-    CHECK_RC(face_tss_send_message(pub, pid, (const uint8_t *)"via-callback",
-                                   12, 0),
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"via-callback", 12),
              FACE_TSS_RC_NO_ERROR);
     while (!st.n && waited < 50) {
         msleep(100);

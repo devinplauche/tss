@@ -74,22 +74,37 @@ FACE_TSS *pub, *sub;
 FACE_TSS_CONNECTION_ID_TYPE tx, rx;
 FACE_TSS_MESSAGE_SIZE_TYPE mx;
 FACE_TSS_MESSAGE m;
+FACE_TSS_TRANSACTION_ID_TYPE txn = FACE_TSS_TRANSACTION_ID_UNSPECIFIED;
+FACE_TSS_QOS_EVENT qos;
 
 face_tss_config_from_file("configs/pubsub_publisher.json", &cfg);
 pub = face_tss_create("tx");
 face_tss_initialize(pub, &cfg);
 face_tss_create_connection(pub, "POSITION", &tx, &mx, 0);
 
-face_tss_send_message(pub, tx, (const uint8_t *)"hello", 5, 1);
+/* timeout (ns), then in/out transaction id: 0 asks the TSS to assign one. */
+face_tss_send_message(pub, tx, 5000000000LL, &txn,
+                      (const uint8_t *)"hello", 5);
 /* ... on the subscriber (role=subscriber, same address): */
-face_tss_receive_message(sub, rx, 5000000000LL, 0, &m);
+face_tss_receive_message(sub, rx, 5000000000LL, 0, &txn, &m, &qos);
+/* m.header carries instance_uid / source_uid / timestamp (FACE HEADER_TYPE). */
 face_tss_message_fini(&m);
 ```
 
 FACE timeouts are int64 nanoseconds; `FACE_TSS_TIMEOUT_INFINITE` (-1) blocks
 forever, `0` polls. A receive that times out returns `FACE_TSS_RC_TIMED_OUT`;
 sends on a `DESTINATION`-only connection return `FACE_TSS_RC_INVALID_MODE`;
-oversize payloads return `FACE_TSS_RC_BUFFER_TOO_SMALL`.
+oversize payloads return `FACE_TSS_RC_DATA_BUFFER_TOO_SMALL`.
+
+## Typed interface (C)
+
+`face_tss/typed.h` provides the FACE `TypedTS` pattern: register a
+`FACE_TSS_TYPE_SUPPORT` descriptor (message GUID + qualified type name +
+serializer/deserializer), then `face_tss_typed_send` /
+`face_tss_typed_receive` move typed structs with GUID checking on the wire.
+`tools/face_tss_codegen.py` generates the descriptor and codec from a flat
+FlatBuffers `.fbs` table; see `c/generated/positionreport_typed.*` and the
+`face_tss_typed_pubsub` demo.
 
 ## Demos (C)
 
@@ -103,7 +118,7 @@ Two processes, publisher first (it owns the listen side):
 ## Tests
 
 ```sh
-ctest --test-dir build --output-on-failure   # C: envelope, config, lifecycle, live
+ctest --test-dir build --output-on-failure   # C: envelope, config, lifecycle, live, typed
 python -m pytest tests/ -q                   # Python mirror implementation
 ```
 
@@ -124,8 +139,11 @@ example type). See `examples/` for `pubsub_demo.py`, `bus_demo.py`,
 - **One FACE connection = one nng socket.** Connection names are uppercased per
   the FACE case-insensitive rule and double as the Pub/Sub topic
   (`NAME + \0`; the NUL keeps `HELLO` from matching `HELLO2`).
-- **Subscribers dial non-blocking**, so start order never matters; publishers
-  listen. Exactly one listener per address (second listener gets `AddressInUse`).
+- **Subscribers dial non-blocking**; publishers listen. Exactly one listener
+  per address (second listener gets `ADDR_IN_USE` / `AddressInUse`). Note:
+  a subscriber started *before* its publisher currently misses messages sent
+  before its dial completes - start the publisher first for reliable fan-out.
+  (Pre-existing transport behavior, verified against the original code.)
 - **Bus0 is a mesh without topic filtering** - every peer hears every peer, and
   a socket never receives its own sends.
 - The envelope codec uses the flatcc `Builder` / raw-layout reads directly

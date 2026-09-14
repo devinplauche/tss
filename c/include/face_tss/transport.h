@@ -40,9 +40,11 @@ FACE_TSS_RETURN_CODE face_tss_transport_open_dial(
 
 void face_tss_transport_close(FACE_TSS_TRANSPORT *t);
 
-/* Send one envelope (framed per transport). */
+/* Send one envelope (framed per transport), waiting at most timeout_ns
+ * for the send to complete (infinite when -1, non-blocking when 0). */
 FACE_TSS_RETURN_CODE face_tss_transport_send(
-    FACE_TSS_TRANSPORT *t, const FACE_TSS_ENVELOPE *env);
+    FACE_TSS_TRANSPORT *t, const FACE_TSS_ENVELOPE *env,
+    FACE_TIMEOUT_TYPE timeout_ns);
 
 /* Receive one envelope, waiting up to timeout_ns (infinite when -1,
  * poll when 0). TIMED_OUT when the wait expires. */

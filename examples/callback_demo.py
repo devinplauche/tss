@@ -28,14 +28,17 @@ def main() -> int:
     arrived = threading.Event()
     seen: list[str] = []
 
-    def on_message(msg) -> None:
-        report = PositionReport.deserialize(msg.payload)
+    def on_message(connection_id, transaction_id, message_guid, payload,
+                   header, qos, context):
+        report = PositionReport.deserialize(payload)
         seen.append(report.vehicle_id)
         print(
-            f"[cb] txn={msg.header.transaction_id} seq={msg.header.sequence_number} "
-            f"vehicle={report.vehicle_id} lat={report.latitude_deg:.4f}"
+            f"[cb] conn={connection_id} txn={transaction_id} "
+            f"iuid={header.instance_uid} vehicle={report.vehicle_id} "
+            f"lat={report.latitude_deg:.4f}"
         )
         arrived.set()
+        return ReturnCode.NO_ERROR
 
     rc = tss.register_callback(conn_id, on_message)
     print(f"[cb] register -> {rc.name} (waiting ~12s for publisher data...)")

@@ -13,8 +13,8 @@ import time
 import pytest
 
 from face_tss import (
-    BufferTooSmallError,
     BusTransport,
+    DataBufferTooSmallError,
     Direction,
     FaceTss,
     PositionReport,
@@ -52,19 +52,26 @@ def test_pubsub_send_receive_round_trip(tcp_addr):
     pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
     try:
         report = PositionReport("N123", 37.5, -122.25, 1500.0, 270.0, True)
-        pub.send_message(pub_id, report.serialize(), transaction_id=11)
-        msg = sub.receive_message(sub_id, timeout_ns=5_000_000_000)
+        # Explicit transaction id passes through.
+        used = pub.send_message(pub_id, report.serialize(), 5_000_000_000,
+                                transaction_id=11)
+        assert used == 11
+        msg, txn, qos = sub.receive_message(sub_id, timeout_ns=5_000_000_000)
         assert PositionReport.deserialize(msg.payload) == report
-        assert msg.header.transaction_id == 11
-        assert msg.header.connection_name == "POSITION"
-        assert msg.header.sequence_number == 1
-        assert msg.header.timestamp_ns > 0
-        assert msg.header.source_id == pub.source_id
+        assert txn == 11
+        assert msg.header.source_uid == pub.source_id
+        assert msg.header.instance_uid != 0
+        assert msg.header.timestamp > 0
+        assert len(qos) == 0
 
-        pub.send_message(pub_id, b"second", transaction_id=12)
-        msg2 = sub.receive_message(sub_id, timeout_ns=5_000_000_000)
+        # Unspecified transaction id: the TSS assigns one (inout semantics).
+        used2 = pub.send_message(pub_id, b"second", 5_000_000_000)
+        assert used2 != 0
+        msg2, txn2, _ = sub.receive_message(sub_id,
+                                            timeout_ns=5_000_000_000)
         assert msg2.payload == b"second"
-        assert msg2.header.sequence_number == 2
+        assert txn2 == used2
+        assert msg2.header.instance_uid != msg.header.instance_uid
     finally:
         pub.finalize()
         sub.finalize()
@@ -155,10 +162,10 @@ def test_bus_two_peers_exchange(tcp_addr):
     b_id = b_holder["id"]
     time.sleep(0.6)
     try:
-        a.send_message(a_id, b"hello-from-a", transaction_id=1)
-        got = b.receive_message(b_id, timeout_ns=5_000_000_000)
+        a.send_message(a_id, b"hello-from-a", 5_000_000_000, transaction_id=1)
+        got, txn, _qos = b.receive_message(b_id, timeout_ns=5_000_000_000)
         assert got.payload == b"hello-from-a"
-        assert got.header.transaction_id == 1
+        assert txn == 1
     finally:
         a.finalize()
         b.finalize()
@@ -177,7 +184,7 @@ def test_oversize_send_rejected(tcp_addr):
     cid, max_size = tss.create_connection("c")
     assert max_size == 8
     try:
-        with pytest.raises(BufferTooSmallError):
+        with pytest.raises(DataBufferTooSmallError):
             tss.send_message(cid, b"012345678")  # 9 bytes
         tss.send_message(cid, b"01234567")  # exactly max: fine
     finally:
@@ -187,19 +194,32 @@ def test_oversize_send_rejected(tcp_addr):
 def test_callback_delivery(tcp_addr):
     pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
     try:
-        got: list[bytes] = []
+        got: list[tuple] = []
         done = threading.Event()
 
-        def on_msg(msg) -> None:
-            got.append(msg.payload)
+        def on_msg(connection_id, transaction_id, message_guid, payload,
+                   header, qos, context) -> ReturnCode:
+            got.append((connection_id, transaction_id, message_guid,
+                        payload, header, qos, context))
             done.set()
+            return ReturnCode.NO_ERROR
 
-        assert sub.register_callback(sub_id, on_msg) == ReturnCode.NO_ERROR
+        assert sub.register_callback(sub_id, on_msg,
+                                      context="ctx") == ReturnCode.NO_ERROR
         assert sub.register_callback(sub_id, on_msg) == ReturnCode.NO_ACTION
         time.sleep(0.2)
-        pub.send_message(pub_id, b"via-callback")
+        pub.send_message(pub_id, b"via-callback", 5_000_000_000,
+                         transaction_id=99, message_guid=1234)
         assert done.wait(timeout=5.0), "callback never fired"
-        assert got == [b"via-callback"]
+        (cid, txn, guid, payload, header, qos, ctx), = got
+        assert cid == sub_id
+        assert txn == 99
+        assert guid == 1234
+        assert payload == b"via-callback"
+        assert header.source_uid == pub.source_id
+        assert header.instance_uid != 0
+        assert len(qos) == 0
+        assert ctx == "ctx"
         assert sub.unregister_callback(sub_id) == ReturnCode.NO_ERROR
     finally:
         pub.finalize()

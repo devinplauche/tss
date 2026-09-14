@@ -4,7 +4,7 @@
  * / create_vector / end_table / finalize_buffer) so no generated code is
  * needed. Decoding uses the raw FlatBuffers object layout with endian-safe
  * memcpy reads plus `flatcc_verify_table_as_root` against a hand-written
- * table verifier that only accepts the six known fields with their exact
+ * table verifier that only accepts the eight known fields with their exact
  * scalar widths.
  */
 
@@ -31,6 +31,8 @@
 #define F_SEQ 3
 #define F_TS 4
 #define F_PAYLOAD 5
+#define F_GUID 6
+#define F_IUID 7
 
 void face_tss_envelope_init(FACE_TSS_ENVELOPE *env)
 {
@@ -99,7 +101,7 @@ FACE_TSS_RETURN_CODE face_tss_envelope_encode(
     if (!payload_ref && env->payload_len > 0)
         goto oom;
 
-    if (flatcc_builder_start_table(B, 6))
+    if (flatcc_builder_start_table(B, 8))
         goto oom;
 
     /* Offsets first, then scalars: flatcc packs offset slots before scalar
@@ -143,6 +145,18 @@ FACE_TSS_RETURN_CODE face_tss_envelope_encode(
         if (!pi64)
             goto oom_table;
         flatbuffers_int64_write_to_pe(pi64, (int64_t)env->timestamp_ns);
+    }
+    if (env->message_guid != 0) {
+        pi64 = (int64_t *)flatcc_builder_table_add(B, F_GUID, 8, 8);
+        if (!pi64)
+            goto oom_table;
+        flatbuffers_int64_write_to_pe(pi64, (int64_t)env->message_guid);
+    }
+    if (env->instance_uid != 0) {
+        pi64 = (int64_t *)flatcc_builder_table_add(B, F_IUID, 8, 8);
+        if (!pi64)
+            goto oom_table;
+        flatbuffers_int64_write_to_pe(pi64, (int64_t)env->instance_uid);
     }
 
     root = flatcc_builder_end_table(B);
@@ -239,13 +253,13 @@ static uint64_t rd_u64(const uint8_t *p)
 }
 
 /* Vtable entry for field id, or 0 when absent. All bounds pre-checked:
- * the caller guarantees vsize covers ids 0..5 (checked once in decode). */
+ * the caller guarantees vsize covers ids 0..7 (checked once in decode). */
 static uint16_t vt_entry(const uint8_t *buf, uint32_t vtable,
                          uint32_t vsize, int id)
 {
     uint32_t at;
     uint16_t e;
-    if (id < 0 || id > 5)
+    if (id < 0 || id > 7)
         return 0;
     if (vsize < (uint32_t)(4 + 2 * id + 2))
         return 0;
@@ -347,10 +361,14 @@ FACE_TSS_RETURN_CODE face_tss_envelope_decode(
     TRY_SCALAR(F_TXN, tmp.transaction_id =
                    (FACE_TSS_TRANSACTION_ID_TYPE)rd_s64(buf + _at));
     TRY_SCALAR(F_SRC, tmp.source_id =
-                   (FACE_TSS_GUID_TYPE)rd_s64(buf + _at));
+                   (FACE_TSS_UID_TYPE)rd_s64(buf + _at));
     TRY_SCALAR(F_SEQ, tmp.sequence_number = rd_u64(buf + _at));
     TRY_SCALAR(F_TS, tmp.timestamp_ns =
                    (FACE_SYSTEM_TIME_TYPE)rd_s64(buf + _at));
+    TRY_SCALAR(F_GUID, tmp.message_guid =
+                   (FACE_TSS_MESSAGE_GUID_TYPE)rd_s64(buf + _at));
+    TRY_SCALAR(F_IUID, tmp.instance_uid =
+                   (FACE_TSS_UID_TYPE)rd_s64(buf + _at));
 #undef TRY_SCALAR
 
     /* field 5: payload vector (absent -> empty). */

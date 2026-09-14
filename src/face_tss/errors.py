@@ -48,9 +48,9 @@ class MessageStaleError(FaceTssError):
         super().__init__(ReturnCode.MESSAGE_STALE, message)
 
 
-class BufferTooSmallError(FaceTssError):
+class DataBufferTooSmallError(FaceTssError):
     def __init__(self, message: str = "supplied buffer is too small") -> None:
-        super().__init__(ReturnCode.BUFFER_TOO_SMALL, message)
+        super().__init__(ReturnCode.DATA_BUFFER_TOO_SMALL, message)
 
 
 class TransportError(FaceTssError):
@@ -69,6 +69,6 @@ __all__ = [
     "ConnectionClosedError",
     "TimedOutError",
     "MessageStaleError",
-    "BufferTooSmallError",
+    "DataBufferTooSmallError",
     "TransportError",
 ]
