@@ -49,6 +49,7 @@ struct FACE_TSS {
     FACE_TSS_CONNECTION_ID_TYPE next_id;
     FACE_TSS_CONN **conns;      /* indexed by (id - 1), NULL when free */
     size_t conns_cap;
+    size_t conns_open;          /* live connections; bounded (3.2 limit) */
     FACE_TSS_TYPE_SUPPORT types[FACE_TSS_MAX_TYPES];
     size_t ntypes;
     FACE_TSS_STATS stats;
@@ -170,6 +171,7 @@ const char *face_tss_rc_str(FACE_TSS_RETURN_CODE rc)
     case FACE_TSS_RC_CONNECTION_CLOSED: return "CONNECTION_CLOSED";
     case FACE_TSS_RC_DATA_BUFFER_TOO_SMALL: return "DATA_BUFFER_TOO_SMALL";
     case FACE_TSS_RC_DATA_OVERFLOW: return "DATA_OVERFLOW";
+    case FACE_TSS_RC_RESOURCE_LIMIT_REACHED: return "RESOURCE_LIMIT_REACHED";
     default: return "UNKNOWN";
     }
 }
@@ -455,6 +457,10 @@ FACE_TSS_RETURN_CODE face_tss_create_connection(
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
     }
+    if (tss->conns_open >= FACE_TSS_MAX_CONNECTIONS) {
+        lock_drop(tss);
+        return FACE_TSS_RC_RESOURCE_LIMIT_REACHED;
+    }
     cfg = face_tss_config_lookup(&tss->config, name);
     if (!cfg) {
         lock_drop(tss);
@@ -495,6 +501,7 @@ FACE_TSS_RETURN_CODE face_tss_create_connection(
         tss->conns_cap = want;
     }
     tss->conns[idx] = c;
+    tss->conns_open++;
     *connection_id = tss->next_id++;
     *max_message_size = cfg->max_message_size;
     lock_drop(tss);
@@ -521,6 +528,7 @@ FACE_TSS_RETURN_CODE face_tss_destroy_connection(
     }
     destroy_conn(tss->conns[idx]);
     tss->conns[idx] = NULL;
+    tss->conns_open--;
     lock_drop(tss);
     return FACE_TSS_RC_NO_ERROR;
 }

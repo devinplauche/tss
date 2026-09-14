@@ -89,6 +89,47 @@ def test_unregister_without_callback_is_no_action(tcp_addr):
     tss.finalize()
 
 
+def test_face32_return_code_and_constants():
+    """FACE 3.2: RESOURCE_LIMIT_REACHED is the 15th return code (value 14),
+    plus the new TSS/Common.idl transaction/GUID constants."""
+    from face_tss import (
+        CALLEE_PROVIDES_GUID,
+        CALLEE_PROVIDES_TID,
+        MAX_CONNECTIONS,
+        TID_NOT_APPLICABLE,
+        ResourceLimitError,
+    )
+
+    assert ReturnCode.RESOURCE_LIMIT_REACHED == 14
+    assert len(ReturnCode) == 15
+    assert TID_NOT_APPLICABLE == -1
+    assert CALLEE_PROVIDES_TID == 0
+    assert CALLEE_PROVIDES_GUID == 0
+    assert MAX_CONNECTIONS == 64
+    assert ResourceLimitError().return_code == ReturnCode.RESOURCE_LIMIT_REACHED
+
+
+def test_connection_limit_raises_resource_limit(tcp_addr):
+    """FACE 3.2: Create_Connection past MAX_CONNECTIONS -> RESOURCE_LIMIT."""
+    from face_tss import MAX_CONNECTIONS, ResourceLimitError
+
+    cfg = TssConfigBuilder().add(
+        "C", direction="DESTINATION", transport="pubsub",
+        role="subscriber", address=tcp_addr()).build()
+    tss = FaceTss()
+    tss.initialize(cfg)
+    ids = [tss.create_connection("c")[0] for _ in range(MAX_CONNECTIONS)]
+    with pytest.raises(ResourceLimitError) as exc:
+        tss.create_connection("c")
+    assert exc.value.return_code == ReturnCode.RESOURCE_LIMIT_REACHED
+    # Freeing one slot lets creation succeed again.
+    tss.destroy_connection(ids.pop(0))
+    tss.create_connection("c")
+    for cid in ids:
+        tss.destroy_connection(cid)
+    tss.finalize()
+
+
 def test_configuration_interface_set_reference():
     """FACE Set_Reference injects a Configuration provider (issue #3)."""
     from face_tss import ConfigurationProvider, InvalidConfigError

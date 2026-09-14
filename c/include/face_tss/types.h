@@ -4,7 +4,7 @@
 /*
  * FACE TSS primitive types (C binding).
  *
- * Mirrors the FACE Technical Standard, Edition 3.1, fixed types used by the
+ * Mirrors the FACE Technical Standard, Edition 3.2, fixed types used by the
  * TSS API (FACE/TSS/Common.idl + FACE/Common.idl): explicit-width integers,
  * UID/timeout/return-code semantics, the connection direction enumeration,
  * and the standard HEADER_TYPE / QoS_EVENT_TYPE shapes.
@@ -73,12 +73,21 @@ typedef int32_t FACE_TSS_MESSAGE_SIZE_TYPE;
 #define FACE_TSS_TRANSACTION_ID_UNSPECIFIED ((FACE_TSS_TRANSACTION_ID_TYPE)0)
 #define FACE_TSS_MESSAGE_GUID_UNSPECIFIED ((FACE_TSS_MESSAGE_GUID_TYPE)0)
 
+/* FACE 3.2 standard constants (FACE/TSS/Common.idl). */
+/* Publisher/subscriber connections: no transaction correlation. */
+#define FACE_TSS_TID_NOT_APPLICABLE ((FACE_TSS_TRANSACTION_ID_TYPE)-1)
+/* Client/server: the callee supplies the transaction ID on send. */
+#define FACE_TSS_CALLEE_PROVIDES_TID ((FACE_TSS_TRANSACTION_ID_TYPE)0)
+/* Message GUID supplied by the callee (same value as UNSPECIFIED). */
+#define FACE_TSS_CALLEE_PROVIDES_GUID ((FACE_TSS_MESSAGE_GUID_TYPE)0)
+
 /* ------------------------------------------------------------------ */
 /* Enumerations                                                       */
 /* ------------------------------------------------------------------ */
 
-/* FACE::RETURN_CODE_TYPE, all 14 standard values (FACE 3.1, FACE/Common.idl).
- * Order and names match the standard. */
+/* FACE::RETURN_CODE_TYPE, all 15 standard values (FACE 3.2, FACE/Common.idl).
+ * Order and names match the standard. RESOURCE_LIMIT_REACHED is the 3.2
+ * addition ("The maximum number of resources has been used"). */
 typedef enum FACE_TSS_RETURN_CODE {
     FACE_TSS_RC_NO_ERROR = 0,
     FACE_TSS_RC_NO_ACTION = 1,
@@ -93,7 +102,8 @@ typedef enum FACE_TSS_RETURN_CODE {
     FACE_TSS_RC_IN_PROGRESS = 10,
     FACE_TSS_RC_CONNECTION_CLOSED = 11,
     FACE_TSS_RC_DATA_BUFFER_TOO_SMALL = 12,
-    FACE_TSS_RC_DATA_OVERFLOW = 13
+    FACE_TSS_RC_DATA_OVERFLOW = 13,
+    FACE_TSS_RC_RESOURCE_LIMIT_REACHED = 14
 } FACE_TSS_RETURN_CODE;
 
 /* FACE connection direction. SOURCE-only sends, DESTINATION-only receives. */
@@ -138,6 +148,10 @@ typedef struct FACE_TSS_QOS_ELEMENT {
  * QoS *policies*; each receive populates one honest, transport-observable
  * element ("message_age_ns"). No staleness policy is enforced. */
 #define FACE_TSS_MAX_QOS_ELEMENTS 16
+
+/* Maximum simultaneously open connections per TSS instance. Exceeding it
+ * yields FACE_TSS_RC_RESOURCE_LIMIT_REACHED (FACE 3.2 return code). */
+#define FACE_TSS_MAX_CONNECTIONS 64
 
 /* FACE::TSS::QoS_EVENT_TYPE: sequence<QoS_Element>. Fixed-capacity C
  * projection to keep the receive path allocation-free. */

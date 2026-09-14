@@ -84,6 +84,16 @@ FACE_TSS_RETURN_CODE face_tss_typed_register_callback(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
     const char *type_name, FACE_TSS_TYPED_CB cb, void *user);
 
+/* FACE::TSS::Typed::TypedTS::Unregister_Callback (FACE 3.2 location; 3.1 had
+ * this operation on the Base interface). Unregisters the connection's
+ * callback, whether typed or untyped - per the IDL it takes only the
+ * connection ID, so type_name is validated (INVALID_PARAM when unknown)
+ * but does not select among multiple callbacks. NO_ACTION when none is
+ * registered. */
+FACE_TSS_RETURN_CODE face_tss_typed_unregister_callback(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    const char *type_name);
+
 #ifdef __cplusplus
 }
 #endif

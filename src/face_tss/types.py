@@ -1,6 +1,6 @@
 """FACE data-model primitive types.
 
-Mirrors the FACE Technical Standard v3.1 fixed types used by the TSS API:
+Mirrors the FACE Technical Standard v3.2 fixed types used by the TSS API:
 integers/floats with explicit widths, FACE string/GUID/timeout/return-code
 semantics, the connection direction + message-validity enumerations, the
 HEADER_TYPE projection (instance_uid / source_uid / timestamp), and the
@@ -25,6 +25,18 @@ CONNECTION_ID_INVALID: int = 0
 TRANSACTION_ID_UNSPECIFIED: int = 0
 MESSAGE_GUID_INVALID: int = 0
 
+#: FACE 3.2 standard constants (FACE/TSS/Common.idl).
+#: Publisher/subscriber connections: no transaction correlation.
+TID_NOT_APPLICABLE: int = -1
+#: Client/server: the callee supplies the transaction ID on send.
+CALLEE_PROVIDES_TID: int = 0
+#: Message GUID supplied by the callee.
+CALLEE_PROVIDES_GUID: int = 0
+
+#: Maximum simultaneously open connections per TSS instance. Exceeding it
+#: yields ReturnCode.RESOURCE_LIMIT_REACHED (FACE 3.2 return code).
+MAX_CONNECTIONS: int = 64
+
 
 class Direction(enum.IntEnum):
     """FACE::TSS::CONNECTION_DIRECTION_TYPE."""
@@ -35,7 +47,7 @@ class Direction(enum.IntEnum):
 
 
 class ReturnCode(enum.IntEnum):
-    """FACE 3.1 RETURN_CODE_TYPE - all 14 values, in standard order."""
+    """FACE 3.2 RETURN_CODE_TYPE - all 15 values, in standard order."""
 
     NO_ERROR = 0
     NO_ACTION = 1
@@ -51,6 +63,7 @@ class ReturnCode(enum.IntEnum):
     CONNECTION_CLOSED = 11
     DATA_BUFFER_TOO_SMALL = 12
     DATA_OVERFLOW = 13
+    RESOURCE_LIMIT_REACHED = 14
 
 
 class MessageValidity(enum.IntEnum):

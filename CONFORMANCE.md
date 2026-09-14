@@ -1,21 +1,53 @@
 # FACE Conformance Tracker
 
-Branch: `face-followups` (follow-ups to `face-conformance`). This document
-tracks how closely the TSS implementation matches the FACE Technical
-Standard v3.1 Transport Services interface, what was changed, and what
-remains.
+This document tracks how closely the TSS implementation matches the FACE
+Technical Standard Transport Services interface, what was changed, and
+what remains.
 
 > **Certification status: NOT CERTIFIED.** Interface-shape alignment is not
 > conformance. Formal FACE conformance requires the FACE Conformance Test
 > Suite (CTS) and certification process, which this project has not run.
 
-## What was aligned (this branch)
+## Target edition: FACE 3.2
+
+The implementation targets the FACE Technical Standard **Edition 3.2**
+Transport Services interfaces (verified against the IDL shipped with CTS
+3.2.3, `FACEConformanceTestSuite_3.2.3/datafiles/IDL/FACE_3.x/`).
+
+### 3.1 -> 3.2 delta (implemented)
+- **New return code** `RESOURCE_LIMIT_REACHED` (value 14): the 15th
+  `RETURN_CODE_TYPE` enumerator. Produced by `Create_Connection` when
+  `FACE_TSS_MAX_CONNECTIONS` (64) connections are already open; destroying
+  a connection frees a slot. (C: `FACE_TSS_RC_RESOURCE_LIMIT_REACHED`,
+  `face_tss_rc_str`; Python: `ReturnCode.RESOURCE_LIMIT_REACHED`,
+  `ResourceLimitError`.)
+- **`Unregister_Callback` moved to TypedTS**: FACE 3.1 had it on `Base`;
+  3.2's `TypedTS.idl` carries it on the `TypedTS` interface. New C API
+  `face_tss_typed_unregister_callback(tss, connection_id, type_name)`
+  (`typed.h`); the old `face_tss_unregister_callback` is kept as a
+  compatibility alias. Python's single `unregister_callback` covers both.
+- **New `TSS/Common.idl` constants**: `FACE_TSS_TID_NOT_APPLICABLE` (-1),
+  `FACE_TSS_CALLEE_PROVIDES_TID` (0), `FACE_TSS_CALLEE_PROVIDES_GUID` (0)
+  (Python: `TID_NOT_APPLICABLE`, `CALLEE_PROVIDES_TID`,
+  `CALLEE_PROVIDES_GUID`).
+- Verified no-change in 3.2: `Send_Message` / `Receive_Message` /
+  `Register_Callback` / `Callback_Handler` signatures, `HEADER_TYPE`,
+  `QoS_EVENT_TYPE`, Configuration interface operations.
+- Not adopted: the `FACE::Logging` injectable seen in one vendor's 3.2-era
+  docs does not appear in the CTS 3.2.3 IDL, so it is not implemented
+  (cannot be verified normatively).
+
+Branch history note: earlier work on this tracker (below) was done against
+3.1; the items above bring it to 3.2.
+
+## What was aligned (face-followups branch)
 
 ### Primitive types (`types.h` / `src/face_tss/types.py`)
-- Full 14-value FACE 3.1 `RETURN_CODE_TYPE` enumeration, in standard order:
+- Full 15-value FACE 3.2 `RETURN_CODE_TYPE` enumeration, in standard order:
   `NO_ERROR, NO_ACTION, NOT_AVAILABLE, INVALID_PARAM, INVALID_CONFIG,
   INVALID_MODE, TIMED_OUT, ADDR_IN_USE, PERMISSION_DENIED, MESSAGE_STALE,
-  IN_PROGRESS, CONNECTION_CLOSED, DATA_BUFFER_TOO_SMALL, DATA_OVERFLOW`.
+  IN_PROGRESS, CONNECTION_CLOSED, DATA_BUFFER_TOO_SMALL, DATA_OVERFLOW,
+  RESOURCE_LIMIT_REACHED` (the last is the 3.2 addition).
 - Renamed `BUFFER_TOO_SMALL` -> `DATA_BUFFER_TOO_SMALL` (standard name).
 - `HEADER_TYPE` projection: `instance_uid` / `source_uid` / `timestamp`.
 - `QoS_EVENT_TYPE` projection: fixed-capacity (8) list of QoS elements.
@@ -60,10 +92,12 @@ remains.
 - Same signature/header/return-code/envelope alignment as the C API
   (`src/face_tss/` + `tests/` + `examples/`).
 
-## Verification (this branch, 2026-09-14)
+## Verification (2026-09-14)
 - CMake build: clean (only pre-existing flatcc sign-compare notes).
-- CTest: 5/5 suites pass (envelope, config, lifecycle, live, typed).
-- Python: 40/40 tests pass.
+- CTest: 5/5 suites pass (envelope, config, lifecycle, live, typed),
+  including the 3.2 regression tests (connection limit, typed unregister,
+  15 return codes).
+- Python: 42/42 tests pass, including the 3.2 regression tests.
 - C untyped pub/sub across processes: late subscriber 17/20 (first 3 missed
   before dial completed - normal pub/sub behavior). Subscriber-first start
   order works (dials retry in the background); only pre-subscription messages

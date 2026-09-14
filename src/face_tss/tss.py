@@ -58,11 +58,13 @@ from .errors import (
     InvalidModeError,
     InvalidParamError,
     NotInitializedError,
+    ResourceLimitError,
     TimedOutError,
 )
 from .transport import CallbackHandle, Transport, open_transport
 from .types import (
     CONNECTION_ID_INVALID,
+    MAX_CONNECTIONS,
     MESSAGE_GUID_INVALID,
     TIMEOUT_INFINITE,
     TRANSACTION_ID_UNSPECIFIED,
@@ -259,6 +261,8 @@ class FaceTss:
         """FACE::TS::Create_Connection -> (connection_id, max_message_size)."""
         with self._lock:
             self._require_initialized()
+            if len(self._connections) >= MAX_CONNECTIONS:
+                raise ResourceLimitError("too many open connections")
             cfg = self._config.lookup(name)  # raises InvalidParamError
             transport = open_transport(cfg)  # raises TransportError
             conn_id = next(self._ids)
@@ -532,7 +536,12 @@ class FaceTss:
             return ReturnCode.NO_ERROR
 
     def unregister_callback(self, connection_id: ConnectionId) -> ReturnCode:
-        """FACE::TS::Unregister_Callback. NO_ACTION if none registered."""
+        """Unregister a connection's callback. NO_ACTION if none registered.
+
+        FACE 3.1 placed Unregister_Callback on the Base interface; FACE 3.2
+        moved it to TypedTS. The Python mirror exposes one method covering
+        both (typed and untyped callbacks share the connection slot).
+        """
         with self._lock:
             conn = self._require_open(connection_id)
             if conn.callback is None:

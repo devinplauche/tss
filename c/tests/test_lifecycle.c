@@ -174,6 +174,8 @@ static void t_return_code_names(void)
                  "DATA_BUFFER_TOO_SMALL") == 0);
     CHECK(strcmp(face_tss_rc_str(FACE_TSS_RC_DATA_OVERFLOW),
                  "DATA_OVERFLOW") == 0);
+    CHECK(strcmp(face_tss_rc_str(FACE_TSS_RC_RESOURCE_LIMIT_REACHED),
+                 "RESOURCE_LIMIT_REACHED") == 0);
     /* Values match the FACE standard's enumeration order. */
     CHECK(FACE_TSS_RC_NO_ERROR == 0 && FACE_TSS_RC_NO_ACTION == 1 &&
           FACE_TSS_RC_NOT_AVAILABLE == 2 && FACE_TSS_RC_INVALID_PARAM == 3 &&
@@ -183,7 +185,43 @@ static void t_return_code_names(void)
           FACE_TSS_RC_MESSAGE_STALE == 9 && FACE_TSS_RC_IN_PROGRESS == 10 &&
           FACE_TSS_RC_CONNECTION_CLOSED == 11 &&
           FACE_TSS_RC_DATA_BUFFER_TOO_SMALL == 12 &&
-          FACE_TSS_RC_DATA_OVERFLOW == 13);
+          FACE_TSS_RC_DATA_OVERFLOW == 13 &&
+          FACE_TSS_RC_RESOURCE_LIMIT_REACHED == 14);
+    TEST_END();
+}
+
+/* FACE 3.2: RESOURCE_LIMIT_REACHED when the connection table is full. */
+static void t_connection_limit(void)
+{
+    FACE_TSS *t = face_tss_create("t");
+    FACE_TSS_CONFIG cfg;
+    FACE_TSS_CONNECTION_CONFIG c;
+    FACE_TSS_CONNECTION_ID_TYPE ids[FACE_TSS_MAX_CONNECTIONS];
+    FACE_TSS_CONNECTION_ID_TYPE id;
+    FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    size_t i;
+    TEST_BEGIN("connection_limit");
+    face_tss_config_init(&cfg, "t");
+    base_conn(&c, "C", "tcp://127.0.0.1:49170");
+    c.direction = FACE_TSS_DESTINATION;
+    c.transport = FACE_TSS_TRANSPORT_PUBSUB;
+    c.role = FACE_TSS_ROLE_SUBSCRIBER;
+    CHECK_RC(face_tss_config_add(&cfg, &c), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_initialize(t, &cfg), FACE_TSS_RC_NO_ERROR);
+    for (i = 0; i < FACE_TSS_MAX_CONNECTIONS; i++)
+        CHECK_RC(face_tss_create_connection(t, "c", &ids[i], &mx, 0),
+                 FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(t, "c", &id, &mx, 0),
+             FACE_TSS_RC_RESOURCE_LIMIT_REACHED);
+    /* Freeing one slot lets creation succeed again. */
+    CHECK_RC(face_tss_destroy_connection(t, ids[0]), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(t, "c", &id, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_destroy_connection(t, id), FACE_TSS_RC_NO_ERROR);
+    for (i = 1; i < FACE_TSS_MAX_CONNECTIONS; i++)
+        CHECK_RC(face_tss_destroy_connection(t, ids[i]), FACE_TSS_RC_NO_ERROR);
+    face_tss_config_fini(&cfg);
+    face_tss_destroy(t);
     TEST_END();
 }
 
@@ -305,6 +343,7 @@ int main(void)
     t_destroy_then_use();
     t_unregister_none();
     t_return_code_names();
+    t_connection_limit();
     t_configuration_interface();
     return TEST_SUMMARY();
 }

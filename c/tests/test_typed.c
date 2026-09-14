@@ -339,12 +339,47 @@ static void t_codegen_extensions(void)
     TEST_END();
 }
 
+/* FACE 3.2: Unregister_Callback lives on TypedTS. */
+static void t_typed_unregister(void)
+{
+    char a[64];
+    FACE_TSS *pub, *sub;
+    FACE_TSS_CONNECTION_ID_TYPE pid, sid;
+    tcb_state_t st;
+    TEST_BEGIN("typed_unregister");
+    memset(&st, 0, sizeof(st));
+    addr(a);
+    make_pair(a, &pub, &sub, &pid, &sid);
+    CHECK_RC(face_tss_typed_unregister_callback(sub, sid, "Nope.Type"),
+             FACE_TSS_RC_INVALID_PARAM);
+    CHECK_RC(face_tss_typed_register_callback(sub, sid,
+                                              "FaceTSS.PositionReport",
+                                              on_typed, &st),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_typed_unregister_callback(sub, sid,
+                                                "FaceTSS.PositionReport"),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_typed_unregister_callback(sub, sid,
+                                                "FaceTSS.PositionReport"),
+             FACE_TSS_RC_NO_ACTION);
+    /* The old Base spelling still works as a compatibility alias. */
+    CHECK_RC(face_tss_typed_register_callback(sub, sid,
+                                              "FaceTSS.PositionReport",
+                                              on_typed, &st),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_unregister_callback(sub, sid), FACE_TSS_RC_NO_ERROR);
+    face_tss_destroy(pub);
+    face_tss_destroy(sub);
+    TEST_END();
+}
+
 int main(void)
 {
     printf("[typed]\n");
     t_register_errors();
     t_typed_round_trip();
     t_typed_callback();
+    t_typed_unregister();
     t_typed_guid_mismatch();
     t_codegen_extensions();
     return TEST_SUMMARY();

@@ -3,7 +3,7 @@
 
 /* FACE Configuration interface injection (issue #3).
  *
- * Per the FACE Technical Standard (3.1):
+ * Per the FACE Technical Standard (3.2):
  * - FACE::CONFIGURATION_RESOURCE is a bounded string (STRING_TYPE, 256)
  *   naming the location of the configuration resource for
  *   TSS::Base::Initialize: "a file name reference, or a reference to a

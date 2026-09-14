@@ -147,3 +147,18 @@ FACE_TSS_RETURN_CODE face_tss_typed_register_callback(
         free(ctx);
     return rc;
 }
+
+FACE_TSS_RETURN_CODE face_tss_typed_unregister_callback(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    const char *type_name)
+{
+    const FACE_TSS_TYPE_SUPPORT *ts;
+    if (!tss || !type_name)
+        return FACE_TSS_RC_INVALID_PARAM;
+    ts = face_tss_priv_typed_lookup(tss, type_name);
+    if (!ts)
+        return FACE_TSS_RC_INVALID_PARAM;
+    /* Per the FACE 3.2 IDL, TypedTS::Unregister_Callback takes only the
+     * connection ID: it clears whatever callback the connection holds. */
+    return face_tss_unregister_callback(tss, connection_id);
+}

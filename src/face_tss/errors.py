@@ -53,6 +53,11 @@ class DataBufferTooSmallError(FaceTssError):
         super().__init__(ReturnCode.DATA_BUFFER_TOO_SMALL, message)
 
 
+class ResourceLimitError(FaceTssError):
+    def __init__(self, message: str = "resource limit reached") -> None:
+        super().__init__(ReturnCode.RESOURCE_LIMIT_REACHED, message)
+
+
 class TransportError(FaceTssError):
     """The nng transport itself failed (mapped to NO_ACTION / NOT_AVAILABLE)."""
 
@@ -70,5 +75,6 @@ __all__ = [
     "TimedOutError",
     "MessageStaleError",
     "DataBufferTooSmallError",
+    "ResourceLimitError",
     "TransportError",
 ]

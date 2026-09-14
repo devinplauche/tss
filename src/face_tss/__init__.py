@@ -23,6 +23,7 @@ from .errors import (
     InvalidParamError,
     MessageStaleError,
     NotInitializedError,
+    ResourceLimitError,
     TimedOutError,
     TransportError,
 )
@@ -37,8 +38,12 @@ from .tss import (
 )
 from .typed import PositionReport, TypedMessage
 from .types import (
+    CALLEE_PROVIDES_GUID,
+    CALLEE_PROVIDES_TID,
     CONNECTION_ID_INVALID,
+    MAX_CONNECTIONS,
     MESSAGE_GUID_INVALID,
+    TID_NOT_APPLICABLE,
     TIMEOUT_INFINITE,
     TRANSACTION_ID_UNSPECIFIED,
     Direction,
@@ -73,6 +78,7 @@ __all__ = [
     "InvalidParamError",
     "MessageStaleError",
     "NotInitializedError",
+    "ResourceLimitError",
     "TimedOutError",
     "TransportError",
     "BusTransport",
@@ -87,7 +93,11 @@ __all__ = [
     "PositionReport",
     "TypedMessage",
     "CONNECTION_ID_INVALID",
+    "CALLEE_PROVIDES_GUID",
+    "CALLEE_PROVIDES_TID",
+    "MAX_CONNECTIONS",
     "MESSAGE_GUID_INVALID",
+    "TID_NOT_APPLICABLE",
     "TIMEOUT_INFINITE",
     "TRANSACTION_ID_UNSPECIFIED",
     "Direction",

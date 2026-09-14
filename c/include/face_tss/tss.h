@@ -4,13 +4,16 @@
 /*
  * FACE Transport Services Segment over nng + FlatBuffers (C binding).
  *
- * Implements the FACE Technical Standard, Edition 3.1, Transport Services
- * interfaces (FACE/TSS/Base.idl, FACE/TSS/Typed.idl):
+ * Implements the FACE Technical Standard, Edition 3.2, Transport Services
+ * interfaces (FACE/TSS/Base.idl, FACE/TSS/TypedTS.idl):
  *
- *   Base interface  - Initialize / Create_Connection / Destroy_Connection /
- *                     Unregister_Callback
- *   Typed interface - Send_Message / Receive_Message / Register_Callback
- *                     (+ Read_Callback::Callback_Handler)
+ *   Base interface  - Initialize / Create_Connection / Destroy_Connection
+ *   Typed interface - Send_Message / Receive_Message / Register_Callback /
+ *                     Unregister_Callback (+ Read_Callback::Callback_Handler)
+ *
+ * (FACE 3.1 placed Unregister_Callback on Base; 3.2 moved it to TypedTS.
+ * The old face_tss_unregister_callback spelling is kept as a compatibility
+ * alias - see below.)
  *
  * C mapping notes:
  * - IDL `out`/`inout` parameters become pointer out-params; the return code
@@ -86,7 +89,8 @@ FACE_TSS_RETURN_CODE face_tss_initialize(
     FACE_TSS *tss, const FACE_TSS_CONFIG *config);
 
 /* FACE::TSS::Base::Create_Connection. `timeout_ns` bounds the blocking time
- * of the call itself. */
+ * of the call itself. RESOURCE_LIMIT_REACHED when FACE_TSS_MAX_CONNECTIONS
+ * are already open. */
 FACE_TSS_RETURN_CODE face_tss_create_connection(
     FACE_TSS *tss, const char *name,
     FACE_TSS_CONNECTION_ID_TYPE *connection_id,
@@ -166,7 +170,12 @@ FACE_TSS_RETURN_CODE face_tss_register_callback(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
     FACE_TSS_MESSAGE_CB cb, void *user);
 
-/* FACE::TSS::Base::Unregister_Callback. NO_ACTION when none is registered. */
+/* Unregister a connection's callback. NO_ACTION when none is registered.
+ *
+ * FACE 3.1 placed Unregister_Callback on the Base interface; FACE 3.2 moved
+ * it to TypedTS. This spelling is kept as a compatibility alias - new code
+ * should use face_tss_typed_unregister_callback (typed.h), which is the
+ * 3.2 location. */
 FACE_TSS_RETURN_CODE face_tss_unregister_callback(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id);
 
