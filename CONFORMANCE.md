@@ -59,7 +59,9 @@ interface, what was changed, and what remains.
 - CTest: 5/5 suites pass (envelope, config, lifecycle, live, typed).
 - Python: 36/36 tests pass.
 - C untyped pub/sub across processes: late subscriber 17/20 (first 3 missed
-  before dial completed - normal pub/sub behavior).
+  before dial completed - normal pub/sub behavior). Subscriber-first start
+  order works (dials retry in the background); only pre-subscription messages
+  are dropped.
 - C typed pub/sub across processes: 17/20, all struct fields decoded.
 - C++17 proof vs new headers: 10/10, FACE header intact, `-Wall -Wextra` clean.
 - Python pub/sub across processes: 16/20 with new header fields.

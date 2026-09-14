@@ -151,10 +151,11 @@ example type). See `examples/` for `pubsub_demo.py`, `bus_demo.py`,
   the FACE case-insensitive rule and double as the Pub/Sub topic
   (`NAME + \0`; the NUL keeps `HELLO` from matching `HELLO2`).
 - **Subscribers dial non-blocking**; publishers listen. Exactly one listener
-  per address (second listener gets `ADDR_IN_USE` / `AddressInUse`). Note:
-  a subscriber started *before* its publisher currently misses messages sent
-  before its dial completes - start the publisher first for reliable fan-out.
-  (Pre-existing transport behavior, verified against the original code.)
+  per address (second listener gets `ADDR_IN_USE` / `AddressInUse`). Dials
+  retry in the background, so start order does not matter for connectivity -
+  but messages a publisher sends before a subscriber's subscription reaches
+  it are dropped (inherent pub/sub semantics): allow ~0.5 s after publisher
+  start before relying on fan-out.
 - **Bus0 is a mesh without topic filtering** - every peer hears every peer, and
   a socket never receives its own sends.
 - The envelope codec uses the flatcc `Builder` / raw-layout reads directly

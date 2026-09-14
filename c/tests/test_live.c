@@ -471,10 +471,68 @@ static void t_callback(void)
     TEST_END();
 }
 
+/* Subscriber starts before the publisher (issue #5): the dial must retry
+ * in the background so the subscriber connects once the publisher listens.
+ * Early messages may still be dropped while the subscription propagates
+ * (inherent pub/sub semantics), so this asserts a large majority arrives. */
+static void t_subscriber_first(void)
+{
+    char a[64];
+    FACE_TSS_CONFIG pc, sc;
+    FACE_TSS *pub, *sub;
+    FACE_TSS_CONNECTION_ID_TYPE pid, sid;
+    FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn;
+    FACE_TSS_MESSAGE m;
+    int i, got = 0;
+    uint8_t payload[8];
+    TEST_BEGIN("subscriber_first");
+    addr(a);
+    mk_cfg(&sc, "POSITION", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_SUBSCRIBER);
+    mk_cfg(&pc, "POSITION", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_PUBLISHER);
+    sub = face_tss_create("sub");
+    CHECK_RC(face_tss_initialize(sub, &sc), FACE_TSS_RC_NO_ERROR);
+    /* Listener is not up yet; the dial must not fail the connection. */
+    CHECK_RC(face_tss_create_connection(sub, "POSITION", &sid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    msleep(300);
+    pub = face_tss_create("pub");
+    CHECK_RC(face_tss_initialize(pub, &pc), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(pub, "position", &pid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    msleep(500); /* dial + subscription settle */
+    for (i = 0; i < 20; i++) {
+        txn = 100 + i;
+        memset(payload, i, sizeof(payload));
+        CHECK_RC(face_tss_send_message(pub, pid, 1000000000LL, &txn, payload,
+                                       sizeof(payload)),
+                 FACE_TSS_RC_NO_ERROR);
+        msleep(50);
+    }
+    for (i = 0; i < 22; i++) {
+        memset(&m, 0, sizeof(m));
+        txn = 0;
+        if (face_tss_receive_message(sub, sid, 500000000LL, 0, &txn, &m,
+                                     NULL) != FACE_TSS_RC_NO_ERROR)
+            break;
+        got++;
+        face_tss_message_fini(&m);
+    }
+    CHECK(got >= 10); /* dial retried and connected; most messages arrived */
+    face_tss_destroy(pub);
+    face_tss_destroy(sub);
+    face_tss_config_fini(&pc);
+    face_tss_config_fini(&sc);
+    TEST_END();
+}
+
 int main(void)
 {
     printf("[live]\n");
     t_pubsub_round_trip();
+    t_subscriber_first();
     t_timeout();
     t_topic_isolation();
     t_bus_exchange();

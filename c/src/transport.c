@@ -76,10 +76,11 @@ static FACE_TSS_RETURN_CODE open_socket(
         } else {
             char topic[FACE_TSS_MAX_CONNECTION_NAME + 1];
             size_t tlen = face_tss_topic_for(cfg->name, topic);
-            rv = nng_dial(s, cfg->address, NULL, 0);
+            /* Non-blocking dial: the dialer retries in the background, so
+             * start order never matters (subscriber may start first). */
+            rv = nng_dial(s, cfg->address, NULL, NNG_FLAG_NONBLOCK);
             if (rv != 0 && rv != NNG_ECONNREFUSED) {
-                /* async dial: keep going; NNG_ECONNREFUSED just means the
-                 * listener is not up yet - the dialer retries. */
+                /* fall through: background retry still applies */
             }
             rv = 0;
             if (cfg->role != FACE_TSS_ROLE_PUBLISHER) {
@@ -93,11 +94,11 @@ static FACE_TSS_RETURN_CODE open_socket(
         }
     } else {
         if (dial_only)
-            rv = nng_dial(s, cfg->address, NULL, 0);
+            rv = nng_dial(s, cfg->address, NULL, NNG_FLAG_NONBLOCK);
         else {
             rv = nng_listen(s, cfg->address, NULL, 0);
             if (rv == NNG_EADDRINUSE)
-                rv = nng_dial(s, cfg->address, NULL, 0);
+                rv = nng_dial(s, cfg->address, NULL, NNG_FLAG_NONBLOCK);
         }
         if (rv != 0 && rv != NNG_ECONNREFUSED)
             rv = 0; /* dialers retry in the background */

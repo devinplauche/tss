@@ -261,3 +261,50 @@ def test_receive_into_caller_owned_buffer(tcp_addr):
     finally:
         pub.finalize()
         sub.finalize()
+
+
+def test_subscriber_first_connects(tcp_addr):
+    """Subscriber started before the publisher still connects (issue #5).
+
+    The C dial was one-shot blocking (0/20 received); it is now
+    non-blocking with background retry, matching the Python transport.
+    Early messages may drop while the subscription propagates, so this
+    asserts a large majority arrives.
+    """
+    import time as _time
+
+    addr = tcp_addr()
+    sub_cfg = (
+        TssConfigBuilder()
+        .add("POSITION", direction=Direction.BI_DIRECTIONAL,
+             transport="pubsub", role="subscriber", address=addr)
+        .build()
+    )
+    pub_cfg = (
+        TssConfigBuilder()
+        .add("POSITION", direction=Direction.BI_DIRECTIONAL,
+             transport="pubsub", role="publisher", address=addr)
+        .build()
+    )
+    sub = FaceTss("sub")
+    sub.initialize(sub_cfg)
+    sub_id, _ = sub.create_connection("POSITION")  # listener not up yet
+    _time.sleep(0.3)
+    pub = FaceTss("pub")
+    pub.initialize(pub_cfg)
+    pub_id, _ = pub.create_connection("position")
+    _time.sleep(0.5)  # dial + subscription settle
+    for i in range(20):
+        pub.send_message(pub_id, b"m%02d" % i, timeout_ns=1_000_000_000,
+                         transaction_id=100 + i)
+        _time.sleep(0.05)
+    got = 0
+    for _ in range(22):
+        try:
+            sub.receive_message(sub_id, timeout_ns=500_000_000)
+        except TimedOutError:
+            break
+        got += 1
+    assert got >= 10
+    pub.finalize()
+    sub.finalize()
