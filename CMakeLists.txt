@@ -49,7 +49,7 @@ else()
     FetchContent_Declare(
         nng
         URL https://github.com/nanomsg/nng/archive/refs/tags/v1.12.3.zip
-        URL_HASH SHA256=9d1a3dd06f3ac9e627513fcbc8ea6f3c1ae59a65eca8007c1d2241f8ef89a9f
+        URL_HASH SHA256=c1705560644dabd26cf7fa9d6ef720d96d48c1d9df548b242b8ede3a49ad04e0
     )
     FetchContent_MakeAvailable(nng)
 endif()
@@ -79,7 +79,7 @@ else()
     FetchContent_Declare(
         flatcc
         URL https://github.com/dvidelabs/flatcc/archive/refs/tags/v0.6.3.zip
-        URL_HASH SHA256=9f22e464a58b0e550035b9e205a3f13b72dc66b869d5e39f584b55cfd0d106
+        URL_HASH SHA256=ca2a1b08a598bd4c510f8de7fd7c459f758df0e28480ae1292c894222e664268
     )
     FetchContent_MakeAvailable(flatcc)
     set(FLATCCRT_TARGET flatccrt)
@@ -168,13 +168,19 @@ if(NOT FACETSS_USE_SYSTEM_FLATCC)
     )
 endif()
 
-# Convenience: copy the dependency .so files next to libTSS.so in the build
-# tree so `ls *.so` shows all three deliverables in one place.
+# Convenience: stage the dependency .so files next to libTSS.so in the
+# build tree so `ls *.so*` shows all three deliverables in one place.
+# nng carries a versioned soname (libnng.so.1 -> libnng.so.1.12.3); stage the
+# full chain plus a plain libnng.so symlink for linkers that ask for -lnng.
 if(NOT FACETSS_USE_SYSTEM_NNG)
     add_custom_command(TARGET TSS POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:nng> $<TARGET_FILE_DIR:TSS>
-        COMMENT "Staging libnng.so next to libTSS.so")
+            $<TARGET_FILE:nng> $<TARGET_FILE_DIR:TSS>/libnng.so.1.12.3
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libnng.so.1.12.3 $<TARGET_FILE_DIR:TSS>/libnng.so.1
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libnng.so.1 $<TARGET_FILE_DIR:TSS>/libnng.so
+        COMMENT "Staging libnng.so.1.12.3 (+soname/dev symlinks) next to libTSS.so")
 endif()
 if(NOT FACETSS_USE_SYSTEM_FLATCC)
     add_custom_command(TARGET TSS POST_BUILD

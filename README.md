@@ -1,13 +1,13 @@
 # faceTSS - FACE Transport Services Segment over nng + FlatBuffers
 
-A Python implementation of the [FACE (Future Airborne Capability Environment)](https://www.opengroup.org/face)
+A C implementation of the [FACE (Future Airborne Capability Environment)](https://www.opengroup.org/face)
 **Transport Services Segment (TSS)** interface, with data movement provided by
-[**nng**](https://nng.nanomsg.org/) (via `pynng`) and message framing provided by
-[**FlatBuffers**](https://flatbuffers.dev/) (via the `flatbuffers` runtime, no `flatc` step).
+[**nng**](https://nng.nanomsg.org/) and message framing provided by
+[**FlatBuffers**](https://flatbuffers.dev/) (via the [flatcc](https://github.com/dvidelabs/flatcc) C runtime).
 
 Implements the FACE TS interface shape - `Initialize` / `Create_Connection` /
 `Destroy_Connection` / `Send_Message` / `Receive_Message` / `Register_Callback` /
-`Unregister_Callback` - on top of two nng patterns:
+`Unregister_Callback` (see `c/include/face_tss/tss.h`) - on top of two nng patterns:
 
 | Transport | nng pattern | Use for |
 |-----------|-------------|---------|
@@ -15,96 +15,109 @@ Implements the FACE TS interface shape - `Initialize` / `Create_Connection` /
 | `bus`     | Bus0 mesh, raw envelopes | small peer groups, bidirectional command nets |
 
 Every message on the wire is a FlatBuffers `TssEnvelope`
-(`schemas/tss_envelope.fbs`): connection name, transaction id, source id,
+(`c/schemas/tss_envelope.fbs`): connection name, transaction id, source id,
 per-connection sequence number, send timestamp, plus the **opaque typed payload**
 built from the application's own schema. The TSS never interprets payload bytes.
+
+A Python implementation of the same design lives in `src/face_tss/` (see below).
+
+## Build: three .so files
+
+The CMake build produces exactly three shared libraries:
+
+| File | What |
+|------|------|
+| `libTSS.so` | the FACE TSS (`face_tss_*` C API) |
+| `libnng.so` | nng v1.12.3 (vendored via FetchContent, shared build) |
+| `libflatccrt.so` | flatcc C runtime v0.6.3 (builder/verifier, RTONLY) |
+
+Prerequisites: Linux, CMake >= 3.16, Ninja (or Make), gcc, network access to
+fetch nng + flatcc (or `-DFACETSS_USE_SYSTEM_NNG=ON` / `-DFACETSS_USE_SYSTEM_FLATCC=ON`
+to link system copies instead).
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build          # envelope, config, lifecycle, live loopback
+ls build/*.so*                  # libTSS.so libnng.so libflatccrt.so
+```
+
+nng carries a versioned soname, so the build tree holds `libnng.so.1.12.3`
+with `libnng.so.1` / `libnng.so` symlinks (same for `libTSS.so.0`).
+
+Useful options: `-DFACETSS_BUILD_TESTS=OFF`, `-DFACETSS_BUILD_EXAMPLES=OFF`,
+`-DFACETSS_ENABLE_WERROR=ON`.
 
 ## Layout
 
 ```
-src/face_tss/      the package
-  types.py         FACE primitives: Direction, ReturnCode, Header, timeouts
-  errors.py        one exception per FACE return-code failure
-  config.py        connection configuration (JSON/TOML/dict/builder)
-  envelope.py      FlatBuffers TSS-envelope codec (hand-rolled, no flatc)
-  transport.py     nng PubSubTransport / BusTransport (+ callbacks)
-  tss.py           FaceTss: the FACE TS interface
-  broker.py        mesh anchor for bus demos (python -m face_tss.broker)
-  typed.py         TypedMessage pattern + PositionReport example type
-schemas/           .fbs sources (envelope wire format + example app type)
-configs/           example node configs (publisher / subscriber / bus)
-examples/          runnable demos (pubsub, bus, callback)
-tests/             pytest suite (codec, config, lifecycle, live loopback)
+c/include/face_tss/   public C API
+  types.h             FACE primitives: directions, return codes, header, timeouts
+  config.h            connection configuration (JSON file / programmatic)
+  envelope.h          FlatBuffers TSS-envelope codec (flatcc runtime)
+  transport.h         nng PubSubTransport / BusTransport (+ callbacks)
+  tss.h               FaceTss: the FACE TS interface
+c/src/                implementation (config, envelope, transport, tss)
+c/schemas/            .fbs sources (envelope wire format + example app type)
+c/tests/              CTest suite (codec, config, lifecycle, live loopback)
+c/examples/           face_tss_pubsub demo (publisher streams, subscriber prints)
+configs/              example node configs (publisher / subscriber / bus)
 ```
 
-## Requirements
+## Quick start (C)
 
-- Python 3.10+
-- `pynng`, `flatbuffers` (`pip install pynng flatbuffers`), `pytest` for tests
+```c
+#include "face_tss/tss.h"
 
-## Quick start
+FACE_TSS_CONFIG cfg;
+FACE_TSS *pub, *sub;
+FACE_TSS_CONNECTION_ID_TYPE tx, rx;
+FACE_TSS_MESSAGE_SIZE_TYPE mx;
+FACE_TSS_MESSAGE m;
 
-```python
-from face_tss import FaceTss, TssConfigBuilder, Direction, PositionReport
+face_tss_config_from_file("configs/pubsub_publisher.json", &cfg);
+pub = face_tss_create("tx");
+face_tss_initialize(pub, &cfg);
+face_tss_create_connection(pub, "POSITION", &tx, &mx, 0);
 
-pub_cfg = (TssConfigBuilder()
-           .add("POSITION", direction="BI_DIRECTIONAL", transport="pubsub",
-                role="publisher", address="tcp://127.0.0.1:5561")
-           .build())
-sub_cfg = (TssConfigBuilder()
-           .add("POSITION", direction="BI_DIRECTIONAL", transport="pubsub",
-                role="subscriber", address="tcp://127.0.0.1:5561")
-           .build())
-
-pub, sub = FaceTss("tx"), FaceTss("rx")
-pub.initialize(pub_cfg)
-sub.initialize(sub_cfg)
-tx_id, _ = pub.create_connection("position")   # names match case-insensitively
-rx_id, _ = sub.create_connection("POSITION")
-
-pub.send_message(tx_id, PositionReport("N123", 37.5, -122.25, 1500, 270, True).serialize(),
-                 transaction_id=1)
-msg = sub.receive_message(rx_id, timeout_ns=5_000_000_000)
-print(PositionReport.deserialize(msg.payload), msg.header.sequence_number)
+face_tss_send_message(pub, tx, (const uint8_t *)"hello", 5, 1);
+/* ... on the subscriber (role=subscriber, same address): */
+face_tss_receive_message(sub, rx, 5000000000LL, 0, &m);
+face_tss_message_fini(&m);
 ```
 
-FACE timeouts are int64 nanoseconds; `TIMEOUT_INFINITE` (-1) blocks forever,
-`0` polls. A receive that times out raises `TimedOutError` (FACE `TIMED_OUT`);
-sends on a `DESTINATION`-only connection raise `InvalidModeError`
-(FACE `INVALID_MODE`); oversize payloads raise `BufferTooSmallError`.
+FACE timeouts are int64 nanoseconds; `FACE_TSS_TIMEOUT_INFINITE` (-1) blocks
+forever, `0` polls. A receive that times out returns `FACE_TSS_RC_TIMED_OUT`;
+sends on a `DESTINATION`-only connection return `FACE_TSS_RC_INVALID_MODE`;
+oversize payloads return `FACE_TSS_RC_BUFFER_TOO_SMALL`.
 
-## Demos
+## Demos (C)
 
 Two processes, publisher first (it owns the listen side):
 
-```
-python examples/pubsub_demo.py pub
-python examples/pubsub_demo.py sub
-```
-
-Bus mesh (broker anchors the mesh, then two peers):
-
-```
-python -m face_tss.broker configs/bus_demo.json
-python examples/bus_demo.py A
-python examples/bus_demo.py B
-```
-
-Callback (push instead of poll) - needs the publisher running:
-
-```
-python examples/callback_demo.py
+```sh
+./build/c/examples/face_tss_pubsub pub configs/pubsub_publisher.json
+./build/c/examples/face_tss_pubsub sub configs/pubsub_subscriber.json
 ```
 
 ## Tests
 
-```
-python -m pytest tests/ -q
+```sh
+ctest --test-dir build --output-on-failure   # C: envelope, config, lifecycle, live
+python -m pytest tests/ -q                   # Python mirror implementation
 ```
 
-`test_transport_live.py` moves real bytes over loopback nng sockets
-(round-trip, timeouts, topic isolation, bus exchange, oversize rejection,
-callback delivery).
+`c/tests/test_live.c` moves real bytes over loopback nng sockets
+(round-trip with header/sequence validation, timeouts, topic isolation,
+bus exchange, oversize rejection, callback delivery).
+
+## Python mirror (`src/face_tss/`)
+
+The same design exists as a Python package (`pynng` + `flatbuffers`,
+no `flatc` step): `types.py`, `errors.py`, `config.py`, `envelope.py`,
+`transport.py`, `tss.py`, `broker.py`, `typed.py` (+ `PositionReport`
+example type). See `examples/` for `pubsub_demo.py`, `bus_demo.py`,
+`callback_demo.py`, and install with `pip install -e .` / `pynng flatbuffers`.
 
 ## Design notes
 
@@ -114,9 +127,8 @@ callback delivery).
 - **Subscribers dial non-blocking**, so start order never matters; publishers
   listen. Exactly one listener per address (second listener gets `AddressInUse`).
 - **Bus0 is a mesh without topic filtering** - every peer hears every peer, and
-  a socket never receives its own sends. One process must listen per address
-  (see `broker.py`); the rest dial.
-- `flatc` is intentionally not required: the envelope codec uses `Builder` /
-  `Table` directly, and app types plug in as opaque bytes (see `typed.py`).
-- `BusTransport.open()` listens and falls back to dial on `AddressInUse`, so a
-  bus node can start before or after the anchor.
+  a socket never receives its own sends.
+- The envelope codec uses the flatcc `Builder` / raw-layout reads directly
+  (no generated code); app types ride opaquely in `TssEnvelope.payload`.
+- `BusTransport` listen falls back to dial on `AddressInUse`, so a bus node
+  can start before or after the anchor.

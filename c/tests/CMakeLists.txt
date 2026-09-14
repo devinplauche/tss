@@ -1,5 +1,5 @@
 foreach(t envelope config lifecycle live)
-    add_executable(face_tss_test_${t} ${t}.c)
+    add_executable(face_tss_test_${t} test_${t}.c)
     target_include_directories(face_tss_test_${t} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/c/include)
