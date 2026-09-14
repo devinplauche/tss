@@ -91,7 +91,11 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(TSS SHARED
     c/src/config.c
+    c/src/csp.c
     c/src/envelope.c
+    c/src/marshalling.c
+    c/src/qos.c
+    c/src/tpm.c
     c/src/transport.c
     c/src/tss.c
     c/src/typed.c

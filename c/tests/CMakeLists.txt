@@ -1,4 +1,4 @@
-foreach(t envelope config lifecycle live)
+foreach(t envelope config lifecycle live conformance extended)
     add_executable(face_tss_test_${t} test_${t}.c)
     target_include_directories(face_tss_test_${t} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
