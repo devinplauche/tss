@@ -42,3 +42,10 @@ if(NOT FACETSS_USE_SYSTEM_FLATCC)
 endif()
 add_test(NAME c-typed COMMAND face_tss_test_typed)
 set_tests_properties(c-typed PROPERTIES TIMEOUT 120)
+
+# C++ binding test
+add_executable(face_tss_test_cpp_binding
+    ${CMAKE_SOURCE_DIR}/cpp/tests/test_cpp_binding.cpp)
+target_link_libraries(face_tss_test_cpp_binding PRIVATE FaceTSS::TSS_CPP)
+add_test(NAME c-cpp-binding COMMAND face_tss_test_cpp_binding)
+set_tests_properties(c-cpp-binding PROPERTIES TIMEOUT 60)

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(faceTSS
     VERSION 0.2.0
     DESCRIPTION "FACE Transport Services Segment over nng + FlatBuffers (C)"
-    LANGUAGES C)
+    LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -193,3 +193,23 @@ if(NOT FACETSS_USE_SYSTEM_FLATCC)
             $<TARGET_FILE:flatccrt> $<TARGET_FILE_DIR:TSS>
         COMMENT "Staging libflatccrt.so next to libTSS.so")
 endif()
+
+# C++ binding: FACE::TSS C++ interfaces over the C library
+# ---------------------------------------------------------------------------
+add_library(TSS_CPP STATIC
+    cpp/src/typed_ts.cpp
+)
+add_library(FaceTSS::TSS_CPP ALIAS TSS_CPP)
+
+target_include_directories(TSS_CPP
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cpp/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/c/include
+)
+target_link_libraries(TSS_CPP PUBLIC FaceTSS::TSS)
+set_target_properties(TSS_CPP PROPERTIES
+    CXX_STANDARD 14
+    CXX_STANDARD_REQUIRED ON
+)
