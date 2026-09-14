@@ -1,0 +1,28 @@
+// FACE TSS wire envelope, FlatBuffers IDL (flatcc codegen input).
+//
+// Data movement contract:
+//   1. The typed payload (application bytes, e.g. a FlatBuffers message
+//      built from the application's own .fbs schema) is stored opaquely in
+//      `payload`.
+//   2. The TSS wraps it in this TSS envelope carrying the FACE routing and
+//      correlation fields (connection name, transaction id, source id,
+//      sequence number, timestamp).
+//   3. The envelope is serialized with the flatcc builder (libflatccrt)
+//      and handed to nng as the message body. On nng Pub/Sub transports a
+//      topic prefix of `connection_name + '\0'` is prepended ahead of the
+//      FlatBuffers bytes so subscribers can filter per-connection.
+//
+// Field ids are fixed wire protocol - do not renumber.
+
+namespace FaceTSS;
+
+table TssEnvelope {
+  connection_name:string;   // 0: FACE CONNECTION_NAME_TYPE (uppercased)
+  transaction_id:long;      // 1: FACE TRANSACTION_ID_TYPE (request/reply correlation)
+  source_id:long;           // 2: FACE GUID_TYPE of the sending TSS instance
+  sequence_number:ulong;    // 3: per-connection sender sequence number
+  timestamp_ns:long;        // 4: sender clock, nanoseconds since Unix epoch
+  payload:[ubyte];          // 5: opaque typed message bytes
+}
+
+root_type TssEnvelope;

@@ -5,3 +5,5 @@ __pycache__/
 build/
 dist/
 .venv/
+# C build trees (out-of-source builds go to build-*/)
+/build*/
