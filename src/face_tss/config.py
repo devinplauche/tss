@@ -185,6 +185,38 @@ def config_from_file(path: str | Path) -> TssConfig:
     )
 
 
+#: Bound of FACE::CONFIGURATION_RESOURCE (STRING_TYPE, 256).
+CONFIGURATION_RESOURCE_MAX = 256
+
+#: The only interface name this TSS accepts via set_reference.
+CONFIGURATION_INTERFACE_NAME = "Configuration"
+
+
+class ConfigurationProvider:
+    """FACE::Configuration interface provider (Injectable pattern).
+
+    Subclass and override :meth:`load` to supply TSS configuration from an
+    arbitrary resource (a configuration service, a database, ...). The
+    provider is installed with :meth:`FaceTss.set_reference` before
+    :meth:`FaceTss.initialize_from_resource`.
+    """
+
+    def load(self, resource: str) -> TssConfig:
+        """Resolve ``resource`` (a CONFIGURATION_RESOURCE) to a TssConfig."""
+        raise NotImplementedError
+
+
+class JsonConfigurationProvider(ConfigurationProvider):
+    """Built-in JSON adapter: ``json:{...}`` parses inline, anything else
+    is treated as a file path. Used automatically by
+    ``initialize_from_resource`` when no provider was injected."""
+
+    def load(self, resource: str) -> TssConfig:
+        if resource.startswith("json:"):
+            return config_from_json(resource[len("json:"):])
+        return config_from_file(resource)
+
+
 @dataclass
 class TssConfigBuilder:
     """Fluent helper for building configs in code / tests."""
@@ -250,4 +282,8 @@ __all__ = [
     "config_from_json",
     "config_from_file",
     "connection_from_mapping",
+    "CONFIGURATION_RESOURCE_MAX",
+    "CONFIGURATION_INTERFACE_NAME",
+    "ConfigurationProvider",
+    "JsonConfigurationProvider",
 ]

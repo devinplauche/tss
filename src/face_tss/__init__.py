@@ -1,7 +1,11 @@
 """face_tss: a FACE Transport Services Segment over nng + FlatBuffers."""
 
 from .config import (
+    CONFIGURATION_INTERFACE_NAME,
+    CONFIGURATION_RESOURCE_MAX,
+    ConfigurationProvider,
     ConnectionConfig,
+    JsonConfigurationProvider,
     TssConfig,
     TssConfigBuilder,
     config_from_file,
@@ -47,7 +51,11 @@ from .types import (
 )
 
 __all__ = [
+    "CONFIGURATION_INTERFACE_NAME",
+    "CONFIGURATION_RESOURCE_MAX",
+    "ConfigurationProvider",
     "ConnectionConfig",
+    "JsonConfigurationProvider",
     "TssConfig",
     "TssConfigBuilder",
     "config_from_file",

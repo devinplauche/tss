@@ -21,8 +21,8 @@
  *   historical shape of this library), while face_tss/typed.h provides the
  *   per-data-type TypedTS projection over registered type support.
  * - The standard's per-receive/per-callback QoS_EVENT_TYPE is plumbed
- *   through; this implementation reports no QoS policies yet, so the event
- *   is always empty (count == 0).
+ *   through; each receive/callback reports one honest element
+ *   (message_age_ns). No QoS policies are enforced.
  * - Read_Callback carries a `void *user` context as a C-idiom extension.
  *
  * Connection model (one FACE connection = one nng socket):
@@ -42,6 +42,7 @@
  */
 
 #include "face_tss/config.h"
+#include "face_tss/configuration.h"
 #include "face_tss/envelope.h"
 #include "face_tss/transport.h"
 #include "face_tss/types.h"
@@ -76,8 +77,11 @@ void face_tss_message_fini(FACE_TSS_MESSAGE *msg);
 FACE_TSS *face_tss_create(const char *instance_name);
 void face_tss_destroy(FACE_TSS *tss);
 
-/* FACE::TSS::Base::Initialize - load configuration (deep copy). Idempotent:
- * second call returns FACE_TSS_RC_NO_ACTION. */
+/* Initialize from a parsed config object. Convenience adapter (not the
+ * FACE IDL shape): the FACE::TSS::Base::Initialize(CONFIGURATION_RESOURCE)
+ * shape is face_tss_initialize_from_resource; a Configuration interface
+ * may be injected first with face_tss_set_reference. Idempotent: second
+ * call returns FACE_TSS_RC_NO_ACTION. */
 FACE_TSS_RETURN_CODE face_tss_initialize(
     FACE_TSS *tss, const FACE_TSS_CONFIG *config);
 

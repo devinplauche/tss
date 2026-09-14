@@ -91,6 +91,14 @@ face_tss_receive_message(sub, rx, 5000000000LL, 0, &txn, &m, &qos);
 face_tss_message_fini(&m);
 ```
 
+The FACE-shaped initialization is `face_tss_set_reference` (install a
+`FACE_TSS_CONFIGURATION` provider, Injectable pattern — must precede
+Initialize) followed by `face_tss_initialize_from_resource`, which takes a
+`CONFIGURATION_RESOURCE`: a bounded string naming the configuration
+location. With no provider injected, the built-in JSON adapter resolves
+the resource — `"json:{...}"` parses inline, anything else is a file path.
+`face_tss_initialize` (config object) remains as a convenience adapter.
+
 FACE timeouts are int64 nanoseconds; `FACE_TSS_TIMEOUT_INFINITE` (-1) blocks
 forever, `0` polls. A receive that times out returns `FACE_TSS_RC_TIMED_OUT`;
 sends on a `DESTINATION`-only connection return `FACE_TSS_RC_INVALID_MODE`;

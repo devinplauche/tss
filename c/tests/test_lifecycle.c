@@ -187,6 +187,114 @@ static void t_return_code_names(void)
     TEST_END();
 }
 
+/* FACE Configuration interface (issue #3): Set_Reference injects a
+ * Configuration provider; Initialize takes a CONFIGURATION_RESOURCE. */
+static char seen_resource[256];
+
+static FACE_TSS_RETURN_CODE test_cfg_load(const char *resource,
+                                          FACE_TSS_CONFIG *config,
+                                          void *user)
+{
+    FACE_TSS_CONNECTION_CONFIG c;
+    if (!resource || !config)
+        return FACE_TSS_RC_INVALID_PARAM;
+    strncpy(seen_resource, resource, sizeof(seen_resource) - 1);
+    seen_resource[sizeof(seen_resource) - 1] = '\0';
+    (void)user;
+    face_tss_config_init(config, "injected");
+    base_conn(&c, "C", "inproc://cfg-test");
+    if (face_tss_config_add(config, &c) != FACE_TSS_RC_NO_ERROR) {
+        face_tss_config_fini(config);
+        return FACE_TSS_RC_INVALID_CONFIG;
+    }
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+static FACE_TSS_RETURN_CODE other_cfg_load(const char *resource,
+                                           FACE_TSS_CONFIG *config,
+                                           void *user)
+{
+    (void)resource; (void)config; (void)user;
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+static void t_configuration_interface(void)
+{
+    FACE_TSS *t;
+    FACE_TSS_CONFIGURATION cfg_iface, other_iface, null_iface;
+    FACE_TSS_CONNECTION_ID_TYPE id;
+    FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    static const char *json =
+        "{\"instance_name\": \"r\", \"connections\": ["
+        " {\"name\": \"C\", \"transport\": \"bus\", \"role\": \"bus\","
+        "  \"address\": \"inproc://cfg-json\"}]}";
+    char resource[512];
+    TEST_BEGIN("configuration_interface");
+    t = face_tss_create("t");
+    CHECK(t != NULL);
+
+    memset(&cfg_iface, 0, sizeof(cfg_iface));
+    cfg_iface.load = test_cfg_load;
+    memset(&other_iface, 0, sizeof(other_iface));
+    other_iface.load = other_cfg_load;
+    memset(&null_iface, 0, sizeof(null_iface)); /* load == NULL */
+
+    /* Injectable validation. */
+    CHECK(face_tss_set_reference(NULL, "Configuration", &cfg_iface, 1) ==
+          FACE_TSS_RC_INVALID_PARAM);
+    CHECK(face_tss_set_reference(t, "Configuration", NULL, 1) ==
+          FACE_TSS_RC_INVALID_PARAM);
+    CHECK(face_tss_set_reference(t, "Configuration", &null_iface, 1) ==
+          FACE_TSS_RC_INVALID_PARAM);
+    CHECK(face_tss_set_reference(t, "NotAConfiguration", &cfg_iface, 1) ==
+          FACE_TSS_RC_INVALID_PARAM);
+
+    /* First set wins; duplicate is NO_ACTION; different is NOT_AVAILABLE. */
+    CHECK_RC(face_tss_set_reference(t, "Configuration", &cfg_iface, 7),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_set_reference(t, "Configuration", &cfg_iface, 7),
+             FACE_TSS_RC_NO_ACTION);
+    CHECK(face_tss_set_reference(t, "Configuration", &other_iface, 8) ==
+          FACE_TSS_RC_NOT_AVAILABLE);
+
+    /* Initialize(CONFIGURATION_RESOURCE) goes through the injected
+     * Configuration interface. */
+    seen_resource[0] = '\0';
+    CHECK_RC(face_tss_initialize_from_resource(t, "service://my-config"),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(strcmp(seen_resource, "service://my-config") == 0);
+    CHECK_RC(face_tss_create_connection(t, "c", &id, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    /* Steady state: no more Set_Reference; Initialize is idempotent. */
+    CHECK(face_tss_set_reference(t, "Configuration", &cfg_iface, 7) ==
+          FACE_TSS_RC_INVALID_MODE);
+    CHECK_RC(face_tss_initialize_from_resource(t, "service://my-config"),
+             FACE_TSS_RC_NO_ACTION);
+    face_tss_destroy(t);
+
+    /* Built-in JSON adapter: inline "json:{...}". */
+    t = face_tss_create("t2");
+    snprintf(resource, sizeof(resource), "json:%s", json);
+    CHECK_RC(face_tss_initialize_from_resource(t, resource),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(t, "c", &id, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    face_tss_destroy(t);
+
+    /* Bad resource / oversize resource. */
+    t = face_tss_create("t3");
+    CHECK(face_tss_initialize_from_resource(t, NULL) ==
+          FACE_TSS_RC_INVALID_PARAM);
+    CHECK(face_tss_initialize_from_resource(t, "/nonexistent/x.json") ==
+          FACE_TSS_RC_INVALID_CONFIG);
+    memset(resource, 'r', sizeof(resource) - 1);
+    resource[sizeof(resource) - 1] = '\0';
+    CHECK(face_tss_initialize_from_resource(t, resource) ==
+          FACE_TSS_RC_INVALID_PARAM);
+    face_tss_destroy(t);
+    TEST_END();
+}
+
 int main(void)
 {
     printf("[lifecycle]\n");
@@ -197,5 +305,6 @@ int main(void)
     t_destroy_then_use();
     t_unregister_none();
     t_return_code_names();
+    t_configuration_interface();
     return TEST_SUMMARY();
 }

@@ -78,8 +78,11 @@ interface, what was changed, and what remains.
   size semantics. The allocating `receive_message` remains as a documented
   convenience extension.
 - **Configuration**: `Initialize` takes a config object, not a FACE
-  `CONFIGURATION_RESOURCE`, and there is no Configuration interface /
-  `Set_Reference`.
+  `CONFIGURATION_RESOURCE` — use `face_tss_set_reference` +
+  `face_tss_initialize_from_resource` (C) or `set_reference` +
+  `initialize_from_resource` (Python) for the FACE shape. The full
+  FACE::Configuration service API (containers/sets) is not implemented;
+  JSON remains the built-in resource adapter.
 - **Connection scope**: `Create_Connection` takes a bare name; no
   `CONNECTION_ID` typedef plumbing beyond the integer ID.
 - **Codegen limits**: unions, vectors of tables/strings, nested vectors,

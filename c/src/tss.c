@@ -1,11 +1,13 @@
 /* FaceTss: the FACE TS interface. See tss.h for contract. */
 
 #include "face_tss/tss.h"
+#include "face_tss/configuration.h"
 #include "face_tss/typed.h"
 #include "tss_priv.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <time.h>
 
 #if defined(_WIN32)
@@ -50,6 +52,8 @@ struct FACE_TSS {
     FACE_TSS_TYPE_SUPPORT types[FACE_TSS_MAX_TYPES];
     size_t ntypes;
     FACE_TSS_STATS stats;
+    FACE_TSS_CONFIGURATION config_iface; /* copied by Set_Reference */
+    int config_iface_set;
 };
 
 /* ------------------------------------------------------------------ */
@@ -230,7 +234,9 @@ void face_tss_destroy(FACE_TSS *tss)
     free(tss);
 }
 
-FACE_TSS_RETURN_CODE face_tss_initialize(
+/* Shared Initialize core: deep-copy the config and mark initialized.
+ * Callers hold no lock; idempotent (NO_ACTION when already initialized). */
+static FACE_TSS_RETURN_CODE initialize_with_config(
     FACE_TSS *tss, const FACE_TSS_CONFIG *config)
 {
     FACE_TSS_CONFIG copy;
@@ -260,6 +266,85 @@ FACE_TSS_RETURN_CODE face_tss_initialize(
     tss->initialized = 1;
     lock_drop(tss);
     return FACE_TSS_RC_NO_ERROR;
+}
+
+FACE_TSS_RETURN_CODE face_tss_initialize(
+    FACE_TSS *tss, const FACE_TSS_CONFIG *config)
+{
+    /* Convenience adapter (not the FACE IDL shape): initialize directly
+     * from a parsed config object. See face_tss_initialize_from_resource
+     * for the FACE::TSS::Base::Initialize(CONFIGURATION_RESOURCE) shape. */
+    return initialize_with_config(tss, config);
+}
+
+/* Built-in JSON resource adapter: "json:{...}" is parsed inline,
+ * anything else is treated as a file path. */
+static FACE_TSS_RETURN_CODE json_resource_load(const char *resource,
+                                               FACE_TSS_CONFIG *out)
+{
+    static const char prefix[] = "json:";
+    if (!resource || !out)
+        return FACE_TSS_RC_INVALID_PARAM;
+    if (strncmp(resource, prefix, sizeof(prefix) - 1) == 0)
+        return face_tss_config_from_json(resource + sizeof(prefix) - 1,
+                                         strlen(resource) - sizeof(prefix) + 1,
+                                         out);
+    return face_tss_config_from_file(resource, out);
+}
+
+FACE_TSS_RETURN_CODE face_tss_set_reference(
+    FACE_TSS *tss, const char *interface_name,
+    const FACE_TSS_CONFIGURATION *configuration,
+    FACE_TSS_UID_TYPE id)
+{
+    (void)id; /* id delineates interface instances; one slot here */
+    if (!tss || !interface_name || !configuration || !configuration->load)
+        return FACE_TSS_RC_INVALID_PARAM;
+    if (strcmp(interface_name, FACE_TSS_CONFIGURATION_INTERFACE_NAME) != 0)
+        return FACE_TSS_RC_INVALID_PARAM;
+    lock_take(tss);
+    if (tss->initialized) {
+        lock_drop(tss);
+        return FACE_TSS_RC_INVALID_MODE; /* steady state */
+    }
+    if (tss->config_iface_set) {
+        int same = (tss->config_iface.load == configuration->load &&
+                    tss->config_iface.user == configuration->user);
+        lock_drop(tss);
+        return same ? FACE_TSS_RC_NO_ACTION : FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    tss->config_iface = *configuration; /* copied; user ptr passes through */
+    tss->config_iface_set = 1;
+    lock_drop(tss);
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+FACE_TSS_RETURN_CODE face_tss_initialize_from_resource(
+    FACE_TSS *tss, const char *configuration_resource)
+{
+    FACE_TSS_CONFIG cfg;
+    FACE_TSS_RETURN_CODE rc;
+    FACE_TSS_CONFIGURATION iface;
+    int have_iface;
+    if (!tss || !configuration_resource ||
+        strlen(configuration_resource) >= FACE_TSS_CONFIGURATION_RESOURCE_MAX)
+        return FACE_TSS_RC_INVALID_PARAM;
+    lock_take(tss);
+    have_iface = tss->config_iface_set;
+    iface = tss->config_iface;
+    lock_drop(tss);
+    face_tss_config_init(&cfg, "tss");
+    if (have_iface)
+        rc = iface.load(configuration_resource, &cfg, iface.user);
+    else
+        rc = json_resource_load(configuration_resource, &cfg);
+    if (rc != FACE_TSS_RC_NO_ERROR) {
+        face_tss_config_fini(&cfg);
+        return rc;
+    }
+    rc = initialize_with_config(tss, &cfg);
+    face_tss_config_fini(&cfg);
+    return rc;
 }
 
 FACE_TSS_UID_TYPE face_tss_source_id(FACE_TSS *tss)

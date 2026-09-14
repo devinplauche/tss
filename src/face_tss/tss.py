@@ -40,12 +40,21 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .config import ConnectionConfig, TssConfig, normalize_name
+from .config import (
+    CONFIGURATION_INTERFACE_NAME,
+    CONFIGURATION_RESOURCE_MAX,
+    ConfigurationProvider,
+    ConnectionConfig,
+    JsonConfigurationProvider,
+    TssConfig,
+    normalize_name,
+)
 from .envelope import Envelope
 from .errors import (
     ConnectionClosedError,
     DataBufferTooSmallError,
     FaceTssError,
+    InvalidConfigError,
     InvalidModeError,
     InvalidParamError,
     NotInitializedError,
@@ -72,6 +81,9 @@ TIMEOUT_INFINITE = TIMEOUT_INFINITE
 ConnectionId = int
 TransactionId = int
 MessageGuid = int
+
+#: Built-in JSON adapter used when no Configuration provider is injected.
+_JSON_PROVIDER = JsonConfigurationProvider()
 
 #: Callback signature: (connection_id, transaction_id, message_guid,
 #: payload, header, qos, context) -> ReturnCode.
@@ -122,6 +134,8 @@ class FaceTss:
         self._lock = threading.RLock()
         self._initialized = False
         self._config = TssConfig(instance_name=instance_name)
+        self._configuration: ConfigurationProvider | None = None
+        self._configuration_set = False
         self._ids = itertools.count(1)
         self._connections: dict[ConnectionId, _Connection] = {}
         self._stats = TssStats()
@@ -153,7 +167,12 @@ class FaceTss:
 
     # -- lifecycle: Initialize ------------------------------------------
     def initialize(self, config: TssConfig) -> ReturnCode:
-        """FACE::TS::Initialize - load configuration. Idempotent."""
+        """Initialize from a parsed config object.
+
+        Convenience adapter (not the FACE IDL shape); the
+        FACE::TSS::Base::Initialize(CONFIGURATION_RESOURCE) shape is
+        :meth:`initialize_from_resource`. Idempotent.
+        """
         with self._lock:
             if self._initialized:
                 return ReturnCode.NO_ACTION
@@ -162,6 +181,71 @@ class FaceTss:
             self._config = config
             self._initialized = True
             return ReturnCode.NO_ERROR
+
+    def set_reference(
+        self,
+        interface_name: str,
+        configuration: ConfigurationProvider,
+        id: int,
+    ) -> ReturnCode:
+        """FACE::TSS::Base::Set_Reference (Injectable).
+
+        Installs the Configuration interface reference; must be called
+        before initialize. Returns NO_ERROR when stored, NO_ACTION when the
+        same provider is already set, NOT_AVAILABLE when a different one is
+        (one Configuration per TSS), INVALID_MODE after initialize.
+        Raises InvalidParamError on bad arguments or an interface name other
+        than "Configuration".
+        """
+        _ = id  # delineates interface instances; one slot per TSS here
+        if not isinstance(interface_name, str) or (
+            interface_name != CONFIGURATION_INTERFACE_NAME
+        ):
+            raise InvalidParamError(
+                'interface_name must be "Configuration"'
+            )
+        if not isinstance(configuration, ConfigurationProvider):
+            raise InvalidParamError(
+                "configuration must be a ConfigurationProvider"
+            )
+        with self._lock:
+            if self._initialized:
+                return ReturnCode.INVALID_MODE  # steady state
+            if self._configuration_set:
+                if self._configuration is configuration:
+                    return ReturnCode.NO_ACTION  # duplicate
+                return ReturnCode.NOT_AVAILABLE
+            self._configuration = configuration
+            self._configuration_set = True
+            return ReturnCode.NO_ERROR
+
+    def initialize_from_resource(self, resource: str) -> ReturnCode:
+        """FACE::TSS::Base::Initialize(CONFIGURATION_RESOURCE).
+
+        Resolves ``resource`` through the injected Configuration provider
+        when one was set via :meth:`set_reference`, otherwise through the
+        built-in JSON adapter (``json:{...}`` inline, or a file path).
+        Idempotent: a second call returns NO_ACTION.
+        """
+        if not isinstance(resource, str) or (
+            len(resource) >= CONFIGURATION_RESOURCE_MAX
+        ):
+            raise InvalidParamError("resource must be a bounded string")
+        with self._lock:
+            provider = (
+                self._configuration
+                if self._configuration_set
+                else _JSON_PROVIDER
+            )
+        try:
+            config = provider.load(resource)
+        except FaceTssError:
+            raise
+        except Exception as exc:
+            raise InvalidConfigError(
+                f"configuration provider failed: {exc}"
+            ) from exc
+        return self.initialize(config)
 
     def finalize(self) -> None:
         """Close every connection and return to the uninitialized state."""

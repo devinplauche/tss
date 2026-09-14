@@ -87,3 +87,63 @@ def test_unregister_without_callback_is_no_action(tcp_addr):
     assert tss.unregister_callback(cid) == ReturnCode.NO_ACTION
     tss.destroy_connection(cid)
     tss.finalize()
+
+
+def test_configuration_interface_set_reference():
+    """FACE Set_Reference injects a Configuration provider (issue #3)."""
+    from face_tss import ConfigurationProvider, InvalidConfigError
+
+    seen = {}
+
+    class MyProvider(ConfigurationProvider):
+        def load(self, resource):
+            seen["resource"] = resource
+            return _cfg()
+
+    other = ConfigurationProvider()
+    tss = FaceTss("t")
+    provider = MyProvider()
+
+    with pytest.raises(InvalidParamError):
+        tss.set_reference("NotAConfiguration", provider, 1)
+    with pytest.raises(InvalidParamError):
+        tss.set_reference("Configuration", object(), 1)
+
+    assert tss.set_reference("Configuration", provider, 7) == ReturnCode.NO_ERROR
+    assert tss.set_reference("Configuration", provider, 7) == ReturnCode.NO_ACTION
+    assert tss.set_reference("Configuration", other, 8) == ReturnCode.NOT_AVAILABLE
+
+    # Initialize(CONFIGURATION_RESOURCE) goes through the injected provider.
+    assert tss.initialize_from_resource("service://my-config") == ReturnCode.NO_ERROR
+    assert seen["resource"] == "service://my-config"
+    cid, _ = tss.create_connection("c")
+    assert cid != 0
+    # Steady state: no more Set_Reference; Initialize is idempotent.
+    assert tss.set_reference("Configuration", provider, 7) == ReturnCode.INVALID_MODE
+    assert tss.initialize_from_resource("service://my-config") == ReturnCode.NO_ACTION
+    tss.finalize()
+
+
+def test_initialize_from_resource_json_adapter():
+    """Built-in JSON adapter: inline json:{...} and file paths (issue #3)."""
+    from face_tss import InvalidConfigError
+
+    tss = FaceTss("t")
+    resource = (
+        'json:{"instance_name": "r", "connections": ['
+        '{"name": "C", "transport": "bus", "role": "bus",'
+        ' "address": "inproc://cfg-json"}]}'
+    )
+    assert tss.initialize_from_resource(resource) == ReturnCode.NO_ERROR
+    cid, _ = tss.create_connection("c")
+    assert cid != 0
+    tss.finalize()
+
+    tss2 = FaceTss("t2")
+    with pytest.raises(InvalidParamError):
+        tss2.initialize_from_resource(None)
+    with pytest.raises(InvalidConfigError):
+        tss2.initialize_from_resource("/nonexistent/x.json")
+    with pytest.raises(InvalidParamError):
+        tss2.initialize_from_resource("r" * 256)
+    tss2.finalize()
