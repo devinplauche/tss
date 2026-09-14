@@ -7,3 +7,5 @@ dist/
 .venv/
 # C build trees (out-of-source builds go to build-*/)
 /build*/
+# CTS distribution (large binary, downloaded for local self-testing)
+/cts/

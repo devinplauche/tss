@@ -162,3 +162,6 @@ example type). See `examples/` for `pubsub_demo.py`, `bus_demo.py`,
   (no generated code); app types ride opaquely in `TssEnvelope.payload`.
 - `BusTransport` listen falls back to dial on `AddressInUse`, so a bus node
   can start before or after the anchor.
+
+## License
+
