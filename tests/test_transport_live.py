@@ -62,7 +62,8 @@ def test_pubsub_send_receive_round_trip(tcp_addr):
         assert msg.header.source_uid == pub.source_id
         assert msg.header.instance_uid != 0
         assert msg.header.timestamp > 0
-        assert len(qos) == 0
+        assert len(qos) == 1
+        assert qos[0].name == "message_age_ns"
 
         # Unspecified transaction id: the TSS assigns one (inout semantics).
         used2 = pub.send_message(pub_id, b"second", 5_000_000_000)
@@ -218,9 +219,45 @@ def test_callback_delivery(tcp_addr):
         assert payload == b"via-callback"
         assert header.source_uid == pub.source_id
         assert header.instance_uid != 0
-        assert len(qos) == 0
+        assert len(qos) == 1
+        assert qos[0].name == "message_age_ns"
         assert ctx == "ctx"
         assert sub.unregister_callback(sub_id) == ReturnCode.NO_ERROR
+    finally:
+        pub.finalize()
+        sub.finalize()
+
+
+def test_receive_into_caller_owned_buffer(tcp_addr):
+    pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
+    try:
+        # Undersized buffer: required size reported in the error, message
+        # discarded.
+        pub.send_message(pub_id, b"hello", 5_000_000_000, transaction_id=21)
+        with pytest.raises(DataBufferTooSmallError) as exc:
+            sub.receive_into(sub_id, bytearray(3),
+                             timeout_ns=5_000_000_000)
+        assert "required size 5" in str(exc.value)
+
+        # Exact fit: payload copied, metadata returned.
+        pub.send_message(pub_id, b"hello", 5_000_000_000, transaction_id=22)
+        buf = bytearray(64)
+        payload_len, txn, header, guid, qos = sub.receive_into(
+            sub_id, buf, timeout_ns=5_000_000_000)
+        assert payload_len == 5
+        assert bytes(buf[:5]) == b"hello"
+        assert txn == 22
+        assert header.source_uid == pub.source_id
+        assert header.timestamp > 0
+        assert len(qos) == 1
+        assert qos[0].name == "message_age_ns"
+
+        # Zero-length payload: empty buffer works.
+        pub.send_message(pub_id, b"", 5_000_000_000, transaction_id=23)
+        payload_len, txn, _, _, _ = sub.receive_into(
+            sub_id, bytearray(0), timeout_ns=5_000_000_000)
+        assert payload_len == 0
+        assert txn == 23
     finally:
         pub.finalize()
         sub.finalize()

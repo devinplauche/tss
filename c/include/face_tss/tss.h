@@ -119,6 +119,23 @@ FACE_TSS_RETURN_CODE face_tss_receive_message(
     FACE_TSS_MESSAGE *msg_out,
     FACE_TSS_QOS_EVENT *qos_out);
 
+/* FACE::TSS::TypedTS::Receive_Message with a caller-owned data buffer.
+ * The payload is copied into `buffer` (capacity `buffer_capacity`) instead
+ * of being allocated. On success `*payload_len_out` is the payload size and
+ * the header/guid/qos outputs are filled (may be NULL).
+ * DATA_BUFFER_TOO_SMALL when the payload does not fit: `*payload_len_out`
+ * is set to the required size and the message is discarded.
+ * TIMED_OUT on expiry, INVALID_MODE on send-only connections,
+ * DATA_BUFFER_TOO_SMALL when the payload is smaller than min_message_size. */
+FACE_TSS_RETURN_CODE face_tss_receive_message_into(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TIMEOUT_TYPE timeout_ns, size_t min_message_size,
+    FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
+    uint8_t *buffer, size_t buffer_capacity, size_t *payload_len_out,
+    FACE_TSS_MESSAGE_GUID_TYPE *message_guid_out,
+    FACE_TSS_HEADER *header_out,
+    FACE_TSS_QOS_EVENT *qos_out);
+
 /* Non-blocking receive: NO_ERROR with *has_msg=false instead of TIMED_OUT.
  * (Convenience extension; not in the FACE IDL.) */
 FACE_TSS_RETURN_CODE face_tss_try_receive(

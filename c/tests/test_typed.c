@@ -141,7 +141,8 @@ static void t_typed_round_trip(void)
     CHECK(header.instance_uid != 0);
     CHECK(header.source_uid == face_tss_source_id(pub));
     CHECK(header.timestamp > 0);
-    CHECK(qos.count == 0);
+    CHECK(qos.count == 1);
+    CHECK(strcmp(qos.elements[0].keyname, "message_age_ns") == 0);
     PositionReport_fini(&back);
 
     /* The wire envelope carries the data-model GUID. */

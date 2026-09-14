@@ -60,6 +60,7 @@ from .types import (
     Direction,
     Header,
     MessageValidity,
+    QosElement,
     QosEvent,
     ReturnCode,
     now_ns,
@@ -274,6 +275,17 @@ class FaceTss:
             return txn
 
     # -- messaging: Receive_Message ---------------------------------------
+    @staticmethod
+    def _qos_for(env: Envelope) -> QosEvent:
+        """Honest, transport-observable QoS data for one received message.
+
+        Currently one element: message_age_ns (receive time minus the send
+        timestamp). No QoS policies are enforced and MESSAGE_STALE is never
+        produced; see issue #2.
+        """
+        age = now_ns() - env.timestamp_ns
+        return QosEvent([QosElement(name="message_age_ns", value=max(age, 0))])
+
     def receive_message(
         self,
         connection_id: ConnectionId,
@@ -312,7 +324,61 @@ class FaceTss:
                 ),
                 message_guid=env.message_guid,
             )
-            return msg, int(env.transaction_id), QosEvent()
+            return msg, int(env.transaction_id), self._qos_for(env)
+
+    def receive_into(
+        self,
+        connection_id: ConnectionId,
+        buffer: bytearray,
+        timeout_ns: int = TIMEOUT_INFINITE,
+        min_message_size: int = 0,
+    ) -> tuple[int, TransactionId, Header, MessageGuid, QosEvent]:
+        """FACE::TS::Receive_Message with a caller-owned buffer.
+
+        Copies the payload into ``buffer`` instead of allocating, mirroring
+        the FACE buffer-too-small semantics. Returns
+        ``(payload_len, transaction_id, header, message_guid, qos_event)``.
+
+        Raises TimedOutError (FACE TIMED_OUT) on timeout, InvalidModeError
+        on send-only connections, DataBufferTooSmallError if the payload is
+        smaller than ``min_message_size`` or does not fit ``buffer``. In
+        the too-small case the message is discarded and the error message
+        reports the required size.
+        """
+        with self._lock:
+            conn = self._require_open(connection_id)
+            if not conn.config.can_receive:
+                raise InvalidModeError(
+                    f"connection {conn.config.name} is SOURCE-only"
+                )
+            try:
+                env = conn.transport.receive(timeout_ns)
+            except TimedOutError:
+                self._stats.receive_timeouts += 1
+                raise
+            if len(env.payload) < min_message_size:
+                raise DataBufferTooSmallError(
+                    f"payload {len(env.payload)} < required {min_message_size}"
+                )
+            if len(env.payload) > len(buffer):
+                raise DataBufferTooSmallError(
+                    f"payload {len(env.payload)} exceeds buffer "
+                    f"{len(buffer)}; required size {len(env.payload)}"
+                )
+            buffer[: len(env.payload)] = env.payload
+            self._stats.received += 1
+            header = Header(
+                instance_uid=env.instance_uid,
+                source_uid=env.source_id,
+                timestamp=env.timestamp_ns,
+            )
+            return (
+                len(env.payload),
+                int(env.transaction_id),
+                header,
+                env.message_guid,
+                self._qos_for(env),
+            )
 
     def try_receive(
         self, connection_id: ConnectionId
@@ -370,7 +436,7 @@ class FaceTss:
                             int(env.message_guid),
                             env.payload,
                             header,
-                            QosEvent(),
+                            self._qos_for(env),
                             ctx,
                         )
                     except Exception:

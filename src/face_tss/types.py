@@ -90,7 +90,8 @@ class QosEvent(list):
     """FACE::TSS::QoS_EVENT_TYPE projection: fixed-capacity QoS elements.
 
     Behaves like a list of QosElement capped at FACE_TSS_QOS_EVENT_MAX
-    entries. This implementation currently reports an empty event.
+    entries. Receives populate one element, ``message_age_ns``; no QoS
+    policies are enforced (see issue #2).
     """
 
     def __init__(self, elements: list[QosElement] | None = None) -> None:

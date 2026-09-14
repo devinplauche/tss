@@ -69,8 +69,14 @@ interface, what was changed, and what remains.
   data buffer + `DATA_BUFFER_TOO_SMALL` when it doesn't fit. This
   implementation still returns an allocated payload and raises/maps the code
   only on the `min_message_size` / `max_message_size` checks.
-- **QoS**: the event type exists and is plumbed, but always empty. No QoS
-  policy management, no `MESSAGE_STALE` production.
+- **QoS**: the event carries one honest element per message
+  (`message_age_ns`) on receive and callback paths. No QoS policy
+  management, no staleness enforcement, no `MESSAGE_STALE` production —
+  unsupported FACE QoS guarantees are documented, not emulated.
+- **Receive buffers**: caller-owned receive is `face_tss_receive_message_into`
+  (C) / `receive_into` (Python) with full `DATA_BUFFER_TOO_SMALL` + required
+  size semantics. The allocating `receive_message` remains as a documented
+  convenience extension.
 - **Configuration**: `Initialize` takes a config object, not a FACE
   `CONFIGURATION_RESOURCE`, and there is no Configuration interface /
   `Set_Reference`.

@@ -544,18 +544,40 @@ static void envelope_to_message(const FACE_TSS_ENVELOPE *env, FACE_TSS_MESSAGE *
     }
 }
 
-FACE_TSS_RETURN_CODE face_tss_receive_message(
+/* Populate the QoS event with honest, transport-observable data.
+ * Currently one element: message_age_ns (receive time minus the send
+ * timestamp in the header). No QoS policies are enforced and MESSAGE_STALE
+ * is never produced; see issue #2. */
+static void qos_fill(FACE_TSS_QOS_EVENT *qos, int64_t timestamp_ns)
+{
+    int64_t age;
+    if (!qos)
+        return;
+    face_tss_qos_event_init(qos);
+    age = now_ns() - timestamp_ns;
+    if (age < 0)
+        age = 0;
+    qos->count = 1;
+    strncpy(qos->elements[0].keyname, "message_age_ns",
+            sizeof(qos->elements[0].keyname) - 1);
+    qos->elements[0].keyname[sizeof(qos->elements[0].keyname) - 1] = '\0';
+    snprintf(qos->elements[0].value, sizeof(qos->elements[0].value),
+             "%lld", (long long)age);
+}
+
+/* Shared receive core: validate, block on the transport, enforce
+ * min_message_size. Returns the envelope; caller must fini it. The TSS
+ * lock is held for the transport call (nng sockets are thread-safe). */
+static FACE_TSS_RETURN_CODE receive_envelope(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
     FACE_TIMEOUT_TYPE timeout_ns, size_t min_message_size,
     FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
-    FACE_TSS_MESSAGE *msg_out,
-    FACE_TSS_QOS_EVENT *qos_out)
+    FACE_TSS_ENVELOPE *env)
 {
     FACE_TSS_CONN *c;
     FACE_TSS_TRANSPORT *tr;
     FACE_TSS_RETURN_CODE rc;
-    FACE_TSS_ENVELOPE env;
-    if (!tss || !transaction_id || !msg_out)
+    if (!tss || !transaction_id || !env)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
     if (!tss->initialized) {
@@ -572,10 +594,8 @@ FACE_TSS_RETURN_CODE face_tss_receive_message(
         return FACE_TSS_RC_INVALID_MODE;
     }
     tr = c->transport;
-    /* Receive while holding the lock (matches the Python implementation;
-     * nng sockets are thread-safe so callbacks can proceed). */
-    face_tss_envelope_init(&env);
-    rc = face_tss_transport_receive(tr, timeout_ns, &env);
+    face_tss_envelope_init(env);
+    rc = face_tss_transport_receive(tr, timeout_ns, env);
     if (rc == FACE_TSS_RC_TIMED_OUT) {
         tss->stats.receive_timeouts++;
         lock_drop(tss);
@@ -585,20 +605,75 @@ FACE_TSS_RETURN_CODE face_tss_receive_message(
         lock_drop(tss);
         return rc;
     }
-    if (env.payload_len < min_message_size) {
-        face_tss_envelope_fini(&env);
+    if (env->payload_len < min_message_size) {
+        face_tss_envelope_fini(env);
         lock_drop(tss);
         return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
     }
-    envelope_to_message(&env, msg_out);
-    *transaction_id = env.transaction_id;
-    if (qos_out)
-        face_tss_qos_event_init(qos_out); /* no QoS policies yet */
-    face_tss_envelope_fini(&env);
     tss->stats.received++;
     lock_drop(tss);
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+FACE_TSS_RETURN_CODE face_tss_receive_message(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TIMEOUT_TYPE timeout_ns, size_t min_message_size,
+    FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
+    FACE_TSS_MESSAGE *msg_out,
+    FACE_TSS_QOS_EVENT *qos_out)
+{
+    FACE_TSS_RETURN_CODE rc;
+    FACE_TSS_ENVELOPE env;
+    if (!msg_out)
+        return FACE_TSS_RC_INVALID_PARAM;
+    rc = receive_envelope(tss, connection_id, timeout_ns, min_message_size,
+                          transaction_id, &env);
+    if (rc != FACE_TSS_RC_NO_ERROR)
+        return rc;
+    envelope_to_message(&env, msg_out);
+    *transaction_id = env.transaction_id;
+    qos_fill(qos_out, env.timestamp_ns);
+    face_tss_envelope_fini(&env);
     if (msg_out->payload_len > 0 && !msg_out->payload)
         return FACE_TSS_RC_NOT_AVAILABLE;
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+FACE_TSS_RETURN_CODE face_tss_receive_message_into(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TIMEOUT_TYPE timeout_ns, size_t min_message_size,
+    FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
+    uint8_t *buffer, size_t buffer_capacity, size_t *payload_len_out,
+    FACE_TSS_MESSAGE_GUID_TYPE *message_guid_out,
+    FACE_TSS_HEADER *header_out,
+    FACE_TSS_QOS_EVENT *qos_out)
+{
+    FACE_TSS_RETURN_CODE rc;
+    FACE_TSS_ENVELOPE env;
+    if (!payload_len_out || (buffer_capacity > 0 && !buffer))
+        return FACE_TSS_RC_INVALID_PARAM;
+    rc = receive_envelope(tss, connection_id, timeout_ns, min_message_size,
+                          transaction_id, &env);
+    if (rc != FACE_TSS_RC_NO_ERROR)
+        return rc;
+    if (env.payload_len > buffer_capacity) {
+        *payload_len_out = env.payload_len;
+        face_tss_envelope_fini(&env);
+        return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
+    }
+    if (env.payload_len > 0)
+        memcpy(buffer, env.payload, env.payload_len);
+    *payload_len_out = env.payload_len;
+    *transaction_id = env.transaction_id;
+    if (message_guid_out)
+        *message_guid_out = env.message_guid;
+    if (header_out) {
+        header_out->instance_uid = env.instance_uid;
+        header_out->source_uid = env.source_id;
+        header_out->timestamp = env.timestamp_ns;
+    }
+    qos_fill(qos_out, env.timestamp_ns);
+    face_tss_envelope_fini(&env);
     return FACE_TSS_RC_NO_ERROR;
 }
 
@@ -656,7 +731,7 @@ static void cb_dispatch(const FACE_TSS_ENVELOPE *env, void *user)
         return;
     /* NOTE: ctx is owned by the connection; freed on unregister/destroy. */
     envelope_to_message(env, &msg);
-    face_tss_qos_event_init(&qos); /* no QoS policies yet */
+    qos_fill(&qos, env->timestamp_ns);
     cb(id, env->transaction_id, env->message_guid,
        msg.payload, msg.payload_len,
        &msg.header, &qos, cb_user, &cb_rc);

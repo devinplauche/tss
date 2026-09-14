@@ -8,7 +8,7 @@
  * - topic isolation at the transport level (BBB frames never arrive on an
  *   AAA subscription).
  * - conformance: header carries instance_uid/source_uid/timestamp;
- *   transaction IDs pass through; QoS events are empty.
+ *   transaction IDs pass through; QoS events carry message_age_ns.
  */
 #include "test.h"
 
@@ -109,7 +109,8 @@ static void t_pubsub_round_trip(void)
     CHECK(m.header.instance_uid != 0);
     CHECK(m.header.source_uid == face_tss_source_id(pub));
     CHECK(m.header.timestamp > 0);
-    CHECK(qos.count == 0); /* no QoS policies yet */
+    CHECK(qos.count == 1); /* message_age_ns element */
+    CHECK(strcmp(qos.elements[0].keyname, "message_age_ns") == 0);
     first_iuid = m.header.instance_uid;
     face_tss_message_fini(&m);
     txn = FACE_TSS_TRANSACTION_ID_UNSPECIFIED;
@@ -310,6 +311,93 @@ static void t_oversize(void)
     TEST_END();
 }
 
+/* Caller-owned receive buffers: exact fit succeeds, undersized reports the
+ * required size and discards, zero-length payloads work, QoS/header/guid
+ * outputs are filled. */
+static void t_receive_into(void)
+{
+    char a[64];
+    FACE_TSS_CONFIG pc, sc;
+    FACE_TSS *pub, *sub;
+    FACE_TSS_CONNECTION_ID_TYPE pid, sid;
+    FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn;
+    FACE_TSS_QOS_EVENT qos;
+    FACE_TSS_HEADER hdr;
+    FACE_TSS_MESSAGE_GUID_TYPE guid;
+    uint8_t buf[64];
+    size_t got;
+    static const uint8_t hello[] = { 'h', 'e', 'l', 'l', 'o' };
+    TEST_BEGIN("receive_into");
+    addr(a);
+    mk_cfg(&pc, "POSITION", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_PUBLISHER);
+    mk_cfg(&sc, "POSITION", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_SUBSCRIBER);
+    pub = face_tss_create("pub");
+    sub = face_tss_create("sub");
+    CHECK_RC(face_tss_initialize(pub, &pc), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_initialize(sub, &sc), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(pub, "position", &pid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(sub, "POSITION", &sid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    msleep(400);
+
+    /* Undersized buffer: required size reported, message discarded. */
+    txn = 21;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn, hello,
+                                   sizeof(hello)),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 0;
+    got = 0;
+    CHECK(face_tss_receive_message_into(sub, sid, 5000000000LL, 0, &txn,
+                                        buf, 3, &got, &guid, &hdr, &qos) ==
+          FACE_TSS_RC_DATA_BUFFER_TOO_SMALL);
+    CHECK(got == sizeof(hello)); /* required size reported */
+
+    /* Exact fit: payload copied, metadata filled. */
+    txn = 22;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn, hello,
+                                   sizeof(hello)),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 0;
+    got = 0;
+    memset(&hdr, 0, sizeof(hdr));
+    guid = 0xFFFFFFFFFFFFFFFFULL;
+    CHECK_RC(face_tss_receive_message_into(sub, sid, 5000000000LL, 0, &txn,
+                                           buf, sizeof(buf), &got, &guid,
+                                           &hdr, &qos),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(got == sizeof(hello));
+    CHECK(memcmp(buf, hello, sizeof(hello)) == 0);
+    CHECK(txn == 22);
+    CHECK(hdr.source_uid == face_tss_source_id(pub));
+    CHECK(hdr.timestamp > 0);
+    CHECK(guid == FACE_TSS_MESSAGE_GUID_UNSPECIFIED);
+    CHECK(qos.count == 1);
+    CHECK(strcmp(qos.elements[0].keyname, "message_age_ns") == 0);
+
+    /* Zero-length payload: NULL buffer with capacity 0 works. */
+    txn = 23;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   NULL, 0),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 0;
+    got = 99;
+    CHECK_RC(face_tss_receive_message_into(sub, sid, 5000000000LL, 0, &txn,
+                                           NULL, 0, &got, NULL, NULL, NULL),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(got == 0);
+    CHECK(txn == 23);
+
+    face_tss_destroy(pub);
+    face_tss_destroy(sub);
+    face_tss_config_fini(&pc);
+    face_tss_config_fini(&sc);
+    TEST_END();
+}
+
 typedef struct { volatile int n; char last[64]; size_t last_len; } cb_state_t;
 
 static void on_msg(FACE_TSS_CONNECTION_ID_TYPE id,
@@ -391,6 +479,7 @@ int main(void)
     t_topic_isolation();
     t_bus_exchange();
     t_oversize();
+    t_receive_into();
     t_callback();
     return TEST_SUMMARY();
 }

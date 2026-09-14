@@ -134,9 +134,9 @@ typedef struct FACE_TSS_QOS_ELEMENT {
     char value[FACE_TSS_MAX_STRING];
 } FACE_TSS_QOS_ELEMENT;
 
-/* Maximum QoS elements carried per message. This implementation currently
- * reports no QoS policies, so events are always empty; the parameter is
- * plumbed per the standard so QoS Management can be added later. */
+/* Maximum QoS elements carried per message. This implementation reports no
+ * QoS *policies*; each receive populates one honest, transport-observable
+ * element ("message_age_ns"). No staleness policy is enforced. */
 #define FACE_TSS_MAX_QOS_ELEMENTS 16
 
 /* FACE::TSS::QoS_EVENT_TYPE: sequence<QoS_Element>. Fixed-capacity C
