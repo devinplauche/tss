@@ -76,8 +76,9 @@ interface, what was changed, and what remains.
   `Set_Reference`.
 - **Connection scope**: `Create_Connection` takes a bare name; no
   `CONNECTION_ID` typedef plumbing beyond the integer ID.
-- **Codegen limits**: one flat table per file; no nested tables, vectors,
-  unions, enums, or explicit field IDs. Not a general `.fbs` compiler.
+- **Codegen limits**: unions, vectors of tables/strings, nested vectors,
+  and explicit field IDs are still rejected. Supported: multiple tables per
+  file, nested tables, scalar vectors, enums with explicit integral base.
 - **Late subscriber**: a subscriber started before its publisher misses
   early messages (verified pre-existing in the original code; README notes
   the publisher-first ordering requirement).

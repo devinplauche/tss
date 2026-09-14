@@ -13,6 +13,9 @@ extern "C" {
 #endif
 
 /* FACE data type: FaceTSS.PositionReport (message GUID 7542349876525629205). */
+
+struct PositionReport;
+
 typedef struct PositionReport {
     char *vehicle_id; /* owned, freed by PositionReport_fini */
     double latitude_deg;

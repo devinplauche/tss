@@ -102,9 +102,12 @@ oversize payloads return `FACE_TSS_RC_DATA_BUFFER_TOO_SMALL`.
 `FACE_TSS_TYPE_SUPPORT` descriptor (message GUID + qualified type name +
 serializer/deserializer), then `face_tss_typed_send` /
 `face_tss_typed_receive` move typed structs with GUID checking on the wire.
-`tools/face_tss_codegen.py` generates the descriptor and codec from a flat
-FlatBuffers `.fbs` table; see `c/generated/positionreport_typed.*` and the
-`face_tss_typed_pubsub` demo.
+`tools/face_tss_codegen.py` generates the descriptor and codec from a
+FlatBuffers `.fbs` schema: scalars, strings, nested tables, scalar vectors
+(`[float]`, `[ubyte]`, ...), and enums with an explicit integral base type.
+See `c/generated/positionreport_typed.*`, `c/generated/telemetry_typed.*`
+and the `face_tss_typed_pubsub` demo. Still rejected: unions, vectors of
+tables/strings, and explicit field `id` attributes.
 
 ## Demos (C)
 

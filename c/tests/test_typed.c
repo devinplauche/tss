@@ -21,6 +21,9 @@ static void msleep(long ms)
 #include "face_tss/tss.h"
 #include "face_tss/typed.h"
 #include "positionreport_typed.h"
+#include "telemetry_typed.h"
+
+#include <stdlib.h>
 
 static int next_port = 49301;
 
@@ -260,6 +263,81 @@ static void t_typed_guid_mismatch(void)
     TEST_END();
 }
 
+/* Codegen extensions: nested table, scalar vector, enum - in-process
+ * serialize/deserialize round trip, absent optionals, malformed input. */
+static void t_codegen_extensions(void)
+{
+    Telemetry out, back;
+    uint8_t *payload = NULL;
+    size_t payload_len = 0;
+    float samples[] = { 1.5f, -2.25f, 3.75f };
+    uint8_t flags[] = { 0x01, 0x02 };
+    TEST_BEGIN("codegen_extensions");
+    memset(&out, 0, sizeof(out));
+    out.device = "sensor-1";
+    out.fix = FixType_Rtk;
+    out.pos = (struct GeoPoint *)calloc(1, sizeof(*out.pos));
+    out.pos->lat = 42.5;
+    out.pos->lon = -83.7;
+    out.samples = samples;
+    out.samples_count = 3;
+    out.flags = flags;
+    out.flags_count = 2;
+    CHECK_RC(Telemetry_serialize(&out, &payload, &payload_len),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(payload != NULL && payload_len > 0);
+
+    memset(&back, 0, sizeof(back));
+    CHECK_RC(Telemetry_deserialize(payload, payload_len, &back),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(strcmp(back.device, "sensor-1") == 0);
+    CHECK(back.fix == FixType_Rtk);
+    CHECK(back.pos != NULL);
+    CHECK(back.pos->lat == 42.5 && back.pos->lon == -83.7);
+    CHECK(back.samples_count == 3);
+    CHECK(back.samples[0] == 1.5f && back.samples[1] == -2.25f &&
+          back.samples[2] == 3.75f);
+    CHECK(back.flags_count == 2);
+    CHECK(back.flags[0] == 0x01 && back.flags[1] == 0x02);
+    Telemetry_fini(&back);
+    free(payload);
+
+    /* Optional nested table / vectors absent: still round-trips. */
+    {
+        Telemetry sparse, sparse_back;
+        uint8_t *p2 = NULL;
+        size_t l2 = 0;
+        memset(&sparse, 0, sizeof(sparse));
+        sparse.device = "bare";
+        CHECK_RC(Telemetry_serialize(&sparse, &p2, &l2),
+                 FACE_TSS_RC_NO_ERROR);
+        memset(&sparse_back, 0, sizeof(sparse_back));
+        CHECK_RC(Telemetry_deserialize(p2, l2, &sparse_back),
+                 FACE_TSS_RC_NO_ERROR);
+        CHECK(strcmp(sparse_back.device, "bare") == 0);
+        CHECK(sparse_back.fix == FixType_None);
+        CHECK(sparse_back.pos == NULL);
+        CHECK(sparse_back.samples == NULL && sparse_back.samples_count == 0);
+        CHECK(sparse_back.flags == NULL && sparse_back.flags_count == 0);
+        Telemetry_fini(&sparse_back);
+        free(p2);
+    }
+
+    /* Malformed input is rejected, not crashed on. */
+    {
+        uint8_t junk[16];
+        Telemetry bad;
+        memset(junk, 0xFF, sizeof(junk));
+        memset(&bad, 0, sizeof(bad));
+        CHECK(Telemetry_deserialize(junk, sizeof(junk), &bad) ==
+              FACE_TSS_RC_INVALID_PARAM);
+        Telemetry_fini(&bad);
+    }
+
+    free(out.pos);
+    TEST_END();
+}
+
 int main(void)
 {
     printf("[typed]\n");
@@ -267,5 +345,6 @@ int main(void)
     t_typed_round_trip();
     t_typed_callback();
     t_typed_guid_mismatch();
+    t_codegen_extensions();
     return TEST_SUMMARY();
 }

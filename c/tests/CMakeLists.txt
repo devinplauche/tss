@@ -19,10 +19,12 @@ foreach(t envelope config lifecycle live)
     set_tests_properties(c-${t} PROPERTIES TIMEOUT 120)
 endforeach()
 
-# Typed interface test: compiles the codegen'd PositionReport wrapper.
+# Typed interface test: compiles the codegen'd PositionReport wrapper
+# (flat schema) and the Telemetry wrapper (nested table, vector, enum).
 add_executable(face_tss_test_typed
     test_typed.c
-    ${CMAKE_SOURCE_DIR}/c/generated/positionreport_typed.c)
+    ${CMAKE_SOURCE_DIR}/c/generated/positionreport_typed.c
+    ${CMAKE_SOURCE_DIR}/c/generated/telemetry_typed.c)
 target_include_directories(face_tss_test_typed PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/c/include

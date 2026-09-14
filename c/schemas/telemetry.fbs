@@ -1,0 +1,22 @@
+// Exercise codegen extensions: nested tables, scalar vectors, enums.
+// Applications define their own .fbs schemas like this one; the TSS carries
+// the serialized bytes opaquely in TssEnvelope.payload.
+
+namespace FaceTSS;
+
+enum FixType : byte { None = 0, Gps = 1, Rtk = 2 }
+
+table GeoPoint {
+  lat:double;
+  lon:double;
+}
+
+table Telemetry {
+  device:string;
+  fix:FixType;
+  pos:GeoPoint;
+  samples:[float];
+  flags:[ubyte];
+}
+
+root_type Telemetry;

@@ -10,6 +10,188 @@
 #include <flatcc/flatcc_builder.h>
 #include <flatcc/flatcc_endian.h>
 
+/* Little-endian field readers (same approach as c/src/envelope.c). */
+static uint16_t rd_u16(const uint8_t *p)
+{ uint16_t v; memcpy(&v, p, 2); return v; }
+static uint32_t rd_u32(const uint8_t *p)
+{ uint32_t v; memcpy(&v, p, 4); return v; }
+
+/* Parse a table header: vtable location and vtable/table sizes. */
+static int table_header(const uint8_t *buf, size_t len, uint32_t table,
+                        uint32_t *vtable_out, uint32_t *vsize_out,
+                        uint32_t *tsize_out)
+{
+    int32_t soff = (int32_t)rd_u32(buf + table);
+    uint32_t vtable = table - (uint32_t)soff;
+    uint32_t vsize, tsize;
+    if (vtable > (uint32_t)(len - 4)) return -1;
+    vsize = rd_u16(buf + vtable);
+    tsize = rd_u16(buf + vtable + 2);
+    if (vsize < 4 || (vsize & 1u) || vsize > (uint32_t)(len - vtable) ||
+        tsize < 4 || tsize > (uint32_t)(len - table)) return -1;
+    *vtable_out = vtable; *vsize_out = vsize; *tsize_out = tsize;
+    return 0;
+}
+
+/* Vtable slot for field idx, or 0 when the field is absent/default. */
+static uint32_t field_at(const uint8_t *buf, uint32_t vtable,
+                         uint32_t vsize, int idx)
+{
+    if (vsize < (uint32_t)(4 + 2 * idx + 2)) return 0;
+    return rd_u16(buf + vtable + 4 + 2 * idx);
+}
+
+static flatcc_builder_ref_t build_PositionReport(flatcc_builder_t *B, const struct PositionReport *m)
+{
+    flatcc_builder_ref_t root;
+    /* field 0: vehicle_id (string) */
+    flatcc_builder_ref_t vehicle_id_ref =
+        flatcc_builder_create_string_str(B, m->vehicle_id ? m->vehicle_id : "");
+    if (!vehicle_id_ref) return 0;
+    if (flatcc_builder_start_table(B, 6)) return 0;
+    /* field 0: vehicle_id */
+    {
+        flatcc_builder_ref_t *pref = flatcc_builder_table_add_offset(B, 0);
+        if (!pref) return 0;
+        *pref = vehicle_id_ref;
+    }
+    /* field 1: latitude_deg */
+    {
+        double *slot = (double *)flatcc_builder_table_add(B, 1, 8, 8);
+        if (!slot) return 0;
+        double tmp_v = (double)(m->latitude_deg);
+        uint64_t tmp_u; memcpy(&tmp_u, &tmp_v, 8);
+        flatbuffers_uint64_write_to_pe((uint64_t *)slot, tmp_u);
+    }
+    /* field 2: longitude_deg */
+    {
+        double *slot = (double *)flatcc_builder_table_add(B, 2, 8, 8);
+        if (!slot) return 0;
+        double tmp_v = (double)(m->longitude_deg);
+        uint64_t tmp_u; memcpy(&tmp_u, &tmp_v, 8);
+        flatbuffers_uint64_write_to_pe((uint64_t *)slot, tmp_u);
+    }
+    /* field 3: altitude_m */
+    {
+        float *slot = (float *)flatcc_builder_table_add(B, 3, 4, 4);
+        if (!slot) return 0;
+        float tmp_v = (float)(m->altitude_m);
+        uint32_t tmp_u; memcpy(&tmp_u, &tmp_v, 4);
+        flatbuffers_uint32_write_to_pe((uint32_t *)slot, tmp_u);
+    }
+    /* field 4: heading_deg */
+    {
+        float *slot = (float *)flatcc_builder_table_add(B, 4, 4, 4);
+        if (!slot) return 0;
+        float tmp_v = (float)(m->heading_deg);
+        uint32_t tmp_u; memcpy(&tmp_u, &tmp_v, 4);
+        flatbuffers_uint32_write_to_pe((uint32_t *)slot, tmp_u);
+    }
+    /* field 5: valid */
+    {
+        bool *slot = (bool *)flatcc_builder_table_add(B, 5, 1, 1);
+        if (!slot) return 0;
+        *slot = (bool)(m->valid);
+    }
+    root = flatcc_builder_end_table(B);
+    return root;
+}
+
+static FACE_TSS_RETURN_CODE parse_PositionReport(const uint8_t *buf, size_t len, uint32_t table, struct PositionReport *m)
+{
+    uint32_t vtable, vsize, tsize, entry, at;
+    FACE_TSS_RETURN_CODE rc;
+    if (table_header(buf, len, table, &vtable, &vsize, &tsize))
+        return FACE_TSS_RC_INVALID_PARAM;
+    /* field 0: vehicle_id */
+    entry = field_at(buf, vtable, vsize, 0);
+    if (entry) {
+        uint32_t off, n, start;
+        if (entry + 4 > tsize)
+            return FACE_TSS_RC_INVALID_PARAM;
+        at = table + entry;
+        if (at > (uint32_t)(len - 4))
+            return FACE_TSS_RC_INVALID_PARAM;
+        off = rd_u32(buf + at);
+        if (off == 0 || off > (uint32_t)(len - at - 4))
+            return FACE_TSS_RC_INVALID_PARAM;
+        at += off;
+        if (at > (uint32_t)(len - 4))
+            return FACE_TSS_RC_INVALID_PARAM;
+        n = rd_u32(buf + at); start = at + 4;
+        if (n + 1 > len - start || buf[start + n] != '\0')
+            return FACE_TSS_RC_INVALID_PARAM;
+        m->vehicle_id = (char *)malloc(n + 1);
+        if (!m->vehicle_id) { PositionReport_fini(m);
+            return FACE_TSS_RC_NOT_AVAILABLE; }
+        memcpy(m->vehicle_id, buf + start, n);
+        m->vehicle_id[n] = '\0';
+    }
+    /* field 1: latitude_deg */
+    entry = field_at(buf, vtable, vsize, 1);
+    if (entry) {
+        if (entry + 8 > tsize)
+            return FACE_TSS_RC_INVALID_PARAM;
+        at = table + entry;
+        if (at > (uint32_t)(len - 8))
+            return FACE_TSS_RC_INVALID_PARAM;
+        memcpy(&m->latitude_deg, buf + at, 8);
+    }
+    /* field 2: longitude_deg */
+    entry = field_at(buf, vtable, vsize, 2);
+    if (entry) {
+        if (entry + 8 > tsize)
+            return FACE_TSS_RC_INVALID_PARAM;
+        at = table + entry;
+        if (at > (uint32_t)(len - 8))
+            return FACE_TSS_RC_INVALID_PARAM;
+        memcpy(&m->longitude_deg, buf + at, 8);
+    }
+    /* field 3: altitude_m */
+    entry = field_at(buf, vtable, vsize, 3);
+    if (entry) {
+        if (entry + 4 > tsize)
+            return FACE_TSS_RC_INVALID_PARAM;
+        at = table + entry;
+        if (at > (uint32_t)(len - 4))
+            return FACE_TSS_RC_INVALID_PARAM;
+        memcpy(&m->altitude_m, buf + at, 4);
+    }
+    /* field 4: heading_deg */
+    entry = field_at(buf, vtable, vsize, 4);
+    if (entry) {
+        if (entry + 4 > tsize)
+            return FACE_TSS_RC_INVALID_PARAM;
+        at = table + entry;
+        if (at > (uint32_t)(len - 4))
+            return FACE_TSS_RC_INVALID_PARAM;
+        memcpy(&m->heading_deg, buf + at, 4);
+    }
+    /* field 5: valid */
+    entry = field_at(buf, vtable, vsize, 5);
+    if (entry) {
+        if (entry + 1 > tsize)
+            return FACE_TSS_RC_INVALID_PARAM;
+        at = table + entry;
+        if (at > (uint32_t)(len - 1))
+            return FACE_TSS_RC_INVALID_PARAM;
+        memcpy(&m->valid, buf + at, 1);
+    }
+    (void)rc;
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+static void fini_PositionReport(struct PositionReport *m)
+{
+    if (!m) return;
+    free(m->vehicle_id); m->vehicle_id = NULL;
+}
+
+void PositionReport_fini(void *msg)
+{
+    fini_PositionReport((struct PositionReport *)msg);
+}
+
 FACE_TSS_RETURN_CODE PositionReport_serialize(
     const void *msg, uint8_t **payload_out, size_t *payload_len_out)
 {
@@ -17,54 +199,12 @@ FACE_TSS_RETURN_CODE PositionReport_serialize(
     flatcc_builder_t builder;
     flatcc_builder_t *B = &builder;
     flatcc_builder_ref_t root;
-    flatcc_builder_ref_t vehicle_id_ref = 0;
     void *buf;
     size_t size;
     if (!msg || !payload_out || !payload_len_out)
         return FACE_TSS_RC_INVALID_PARAM;
     flatcc_builder_init(B);
-    vehicle_id_ref = flatcc_builder_create_string_str(
-        B, m->vehicle_id ? m->vehicle_id : "");
-    if (!vehicle_id_ref) { flatcc_builder_clear(B);
-        return FACE_TSS_RC_NOT_AVAILABLE; }
-    if (flatcc_builder_start_table(B, 6)) {
-        flatcc_builder_clear(B);
-        return FACE_TSS_RC_NOT_AVAILABLE; }
-    { flatcc_builder_ref_t *pref =
-          flatcc_builder_table_add_offset(B, 0);
-      if (!pref) { flatcc_builder_clear(B);
-          return FACE_TSS_RC_NOT_AVAILABLE; }
-      *pref = vehicle_id_ref; }
-    { double *slot = (double *)
-          flatcc_builder_table_add(B, 1, 8, 8);
-      if (!slot) { flatcc_builder_clear(B);
-          return FACE_TSS_RC_NOT_AVAILABLE; }
-      uint64_t v64; memcpy(&v64, &m->latitude_deg, 8);
-      flatbuffers_uint64_write_to_pe((uint64_t *)slot, v64); }
-    { double *slot = (double *)
-          flatcc_builder_table_add(B, 2, 8, 8);
-      if (!slot) { flatcc_builder_clear(B);
-          return FACE_TSS_RC_NOT_AVAILABLE; }
-      uint64_t v64; memcpy(&v64, &m->longitude_deg, 8);
-      flatbuffers_uint64_write_to_pe((uint64_t *)slot, v64); }
-    { float *slot = (float *)
-          flatcc_builder_table_add(B, 3, 4, 4);
-      if (!slot) { flatcc_builder_clear(B);
-          return FACE_TSS_RC_NOT_AVAILABLE; }
-      uint32_t v32; memcpy(&v32, &m->altitude_m, 4);
-      flatbuffers_uint32_write_to_pe((uint32_t *)slot, v32); }
-    { float *slot = (float *)
-          flatcc_builder_table_add(B, 4, 4, 4);
-      if (!slot) { flatcc_builder_clear(B);
-          return FACE_TSS_RC_NOT_AVAILABLE; }
-      uint32_t v32; memcpy(&v32, &m->heading_deg, 4);
-      flatbuffers_uint32_write_to_pe((uint32_t *)slot, v32); }
-    { bool *slot = (bool *)
-          flatcc_builder_table_add(B, 5, 1, 1);
-      if (!slot) { flatcc_builder_clear(B);
-          return FACE_TSS_RC_NOT_AVAILABLE; }
-      *slot = m->valid; }
-    root = flatcc_builder_end_table(B);
+    root = build_PositionReport(B, m);
     if (!root || flatcc_builder_start_buffer(B, 0, 0, 0) ||
         !flatcc_builder_end_buffer(B, root)) {
         flatcc_builder_clear(B);
@@ -88,21 +228,16 @@ FACE_TSS_RETURN_CODE PositionReport_serialize(
     return FACE_TSS_RC_NO_ERROR;
 }
 
-/* Little-endian field readers (same approach as c/src/envelope.c). */
-static uint16_t rd_u16(const uint8_t *p)
-{ uint16_t v; memcpy(&v, p, 2); return v; }
-static uint32_t rd_u32(const uint8_t *p)
-{ uint32_t v; memcpy(&v, p, 4); return v; }
-
 FACE_TSS_RETURN_CODE PositionReport_deserialize(
     const uint8_t *payload, size_t payload_len, void *msg_out)
 {
     struct PositionReport *m = (struct PositionReport *)msg_out;
     const uint8_t *buf = payload;
     size_t len = payload_len;
-    uint32_t root, table, vtable, vsize, tsize, entry, at, off, n, start;
+    uint32_t root, table, vtable, vsize, tsize;
     int32_t soff;
     uint8_t *copy = NULL;
+    FACE_TSS_RETURN_CODE rc;
     if (!msg_out)
         return FACE_TSS_RC_INVALID_PARAM;
     memset(m, 0, sizeof(*m));
@@ -128,100 +263,9 @@ FACE_TSS_RETURN_CODE PositionReport_deserialize(
     if (vsize < 4 || (vsize & 1u) || vsize > (uint32_t)(len - vtable) ||
         tsize < 4 || tsize > (uint32_t)(len - table))
         { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-    /* field 0: vehicle_id */
-    entry = 0;
-    if (vsize >= (uint32_t)(4 + 2 * 0 + 2))
-        entry = rd_u16(buf + vtable + 4 + 2 * 0);
-    if (entry != 0) {
-        if (entry + 4 > tsize)
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        at = table + entry;
-        if (at > (uint32_t)(len - 4))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        off = rd_u32(buf + at);
-        if (off == 0 || off > (uint32_t)(len - at - 4))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        at += off;
-        if (at > (uint32_t)(len - 4))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        n = rd_u32(buf + at); start = at + 4;
-        if (n + 1 > len - start || buf[start + n] != '\0')
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        m->vehicle_id = (char *)malloc(n + 1);
-        if (!m->vehicle_id) { free(copy); PositionReport_fini(m);
-            return FACE_TSS_RC_NOT_AVAILABLE; }
-        memcpy(m->vehicle_id, buf + start, n);
-        m->vehicle_id[n] = '\0';
-    }
-    /* field 1: latitude_deg */
-    entry = 0;
-    if (vsize >= (uint32_t)(4 + 2 * 1 + 2))
-        entry = rd_u16(buf + vtable + 4 + 2 * 1);
-    if (entry != 0) {
-        if (entry + 8 > tsize)
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        at = table + entry;
-        if (at > (uint32_t)(len - 8))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        memcpy(&m->latitude_deg, buf + at, 8);
-    }
-    /* field 2: longitude_deg */
-    entry = 0;
-    if (vsize >= (uint32_t)(4 + 2 * 2 + 2))
-        entry = rd_u16(buf + vtable + 4 + 2 * 2);
-    if (entry != 0) {
-        if (entry + 8 > tsize)
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        at = table + entry;
-        if (at > (uint32_t)(len - 8))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        memcpy(&m->longitude_deg, buf + at, 8);
-    }
-    /* field 3: altitude_m */
-    entry = 0;
-    if (vsize >= (uint32_t)(4 + 2 * 3 + 2))
-        entry = rd_u16(buf + vtable + 4 + 2 * 3);
-    if (entry != 0) {
-        if (entry + 4 > tsize)
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        at = table + entry;
-        if (at > (uint32_t)(len - 4))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        memcpy(&m->altitude_m, buf + at, 4);
-    }
-    /* field 4: heading_deg */
-    entry = 0;
-    if (vsize >= (uint32_t)(4 + 2 * 4 + 2))
-        entry = rd_u16(buf + vtable + 4 + 2 * 4);
-    if (entry != 0) {
-        if (entry + 4 > tsize)
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        at = table + entry;
-        if (at > (uint32_t)(len - 4))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        memcpy(&m->heading_deg, buf + at, 4);
-    }
-    /* field 5: valid */
-    entry = 0;
-    if (vsize >= (uint32_t)(4 + 2 * 5 + 2))
-        entry = rd_u16(buf + vtable + 4 + 2 * 5);
-    if (entry != 0) {
-        if (entry + 1 > tsize)
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        at = table + entry;
-        if (at > (uint32_t)(len - 1))
-            { free(copy); return FACE_TSS_RC_INVALID_PARAM; }
-        memcpy(&m->valid, buf + at, 1);
-    }
+    rc = parse_PositionReport(buf, len, table, m);
     free(copy);
-    return FACE_TSS_RC_NO_ERROR;
-}
-
-void PositionReport_fini(void *msg)
-{
-    struct PositionReport *m = (struct PositionReport *)msg;
-    if (!m) return;
-    free(m->vehicle_id); m->vehicle_id = NULL;
+    return rc;
 }
 
 const FACE_TSS_TYPE_SUPPORT PositionReport_type_support = {
