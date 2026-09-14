@@ -1,0 +1,14 @@
+{
+  "instance_name": "demo-bus",
+  "connections": [
+    {
+      "name": "COMMAND",
+      "direction": "BI_DIRECTIONAL",
+      "transport": "bus",
+      "role": "bus",
+      "address": "tcp://127.0.0.1:5571",
+      "max_message_size": 65536,
+      "queue_depth": 64
+    }
+  ]
+}

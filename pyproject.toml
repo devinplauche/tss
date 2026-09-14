@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "face-tss"
+version = "0.1.0"
+description = "FACE Transport Services Segment (TSS) over nng + FlatBuffers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pynng>=0.7",
+    "flatbuffers>=23",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+examples = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

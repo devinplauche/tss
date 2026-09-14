@@ -1,0 +1,17 @@
+namespace FaceTSS;
+
+/**
+ * Example application data type: periodic position report.
+ * Applications define their own .fbs schemas like this one; the TSS carries
+ * the serialized bytes opaquely in TssEnvelope.payload.
+ */
+table PositionReport {
+  vehicle_id:string;
+  latitude_deg:double;
+  longitude_deg:double;
+  altitude_m:float;
+  heading_deg:float;
+  valid:bool;
+}
+
+root_type PositionReport;

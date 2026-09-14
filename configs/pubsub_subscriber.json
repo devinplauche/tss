@@ -1,0 +1,14 @@
+{
+  "instance_name": "demo-node",
+  "connections": [
+    {
+      "name": "POSITION",
+      "direction": "BI_DIRECTIONAL",
+      "transport": "pubsub",
+      "role": "subscriber",
+      "address": "tcp://127.0.0.1:5561",
+      "max_message_size": 65536,
+      "queue_depth": 64
+    }
+  ]
+}
