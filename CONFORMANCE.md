@@ -40,7 +40,56 @@ Transport Services interfaces (verified against the IDL shipped with CTS
 Branch history note: earlier work on this tracker (below) was done against
 3.1; the items above bring it to 3.2.
 
-## CTS 3.2.3 self-test (2026-09-14)
+## CTS 3.2.3 full workflow run (2026-09-14)
+
+The official FACE Conformance Test Suite 3.2.3 distribution was downloaded
+(`cts/Linux_CTS_3.2.3_Distribution.zip`, gitignored, not committed). The
+complete CLI-driven CTS workflow was executed for the `face_tss` unit of
+conformance (a FACE 3.2 C99 TSS UoC):
+
+1. **Project validation** (`conformance_test.py -v`): the TSS project
+   configuration (`cts/project/face_tss.pcfg`, `gcc_linux_c99.tcfg`,
+   both local/gitignored) validates cleanly.
+2. **GSL generation** (`conformance_test.py -g`): Gold Standard Libraries
+   for the TSS Base and TypedTS interfaces generate successfully; the
+   project exports build under the configured C99 toolchain.
+3. **Strict toolchain verification**: 41/41 `PASSED`.
+4. **Full conformance run** (`conformance_test.py face_tss.pcfg`): exit
+   code **0**. Report: `cts/project/FACEConformanceTest_face_tss.pdf`
+   (28 pages, local/gitignored).
+
+Reported results:
+- Data Model Conformance Tests: **PASSED** (all four checks: FACE
+  metamodel validation, OCL constraints, view specification validation,
+  shared data model conformance).
+- TS Segment Conformance Tests: **PASSED**.
+  - Base Interface: **PASSED** (3/3 link assertions: Initialize,
+    Create_Connection, Destroy_Connection).
+  - Typed Interface: **PASSED** (12/12 link assertions for the three
+    generated TypedTS interfaces).
+  - TSS POSIX fork: **PASSED** (limited-GSL fork/exec link check).
+
+Scope and limitations (read before citing these results):
+- The CTS C Base/TypedTS interface assertions are **link checks**: the CTS
+  compiles and links the generated test executables against the
+  CTS-local C99 adapter (`cts/project/uoc/`, gitignored) but never runs
+  them. The adapter is a signature-level stub with exact generated FACE
+  signatures and no heap/libc calls, required by the Non-OSS toolchain's
+  `-nodefaultlibs -nostartfiles` constraints. **This is interface/signature
+  validation, not functional TypedTS validation.** Real behavior is covered
+  by the repo's own C/Python test suites and the earlier functional
+  Base-adapter smoke test.
+- Environment note: the Java Data Model validator connects to the CTS
+  Python protobuf server over loopback; in this sandbox Java's default
+  IPv6-mapped IPv4 connection is accepted by the kernel but never reaches
+  an IPv4 listening socket. Forcing IPv4 with
+  `JAVA_TOOL_OPTIONS=-Djava.net.preferIPv4Stack=true` resolves it. No CTS
+  or UoC code was modified for this.
+- Formal FACE certification still requires an approved Verification
+  Authority. This project is **not certified** and must not be described
+  as certified or fully conformant.
+
+## Earlier CTS 3.2.3 self-test (2026-09-14, superseded by the full run above)
 
 The official FACE Conformance Test Suite 3.2.3 distribution was downloaded
 (`cts/Linux_CTS_3.2.3_Distribution.zip`, gitignored, not committed). A
@@ -62,11 +111,23 @@ Results:
   (valid id + max size), unknown name -> `INVALID_PARAM`, Destroy twice ->
   `NO_ERROR` then `NO_ACTION`, and the 3.2 `RESOURCE_LIMIT_REACHED` value
   present in the mapping.
-- Out of scope for this pass: the CTS GUI workflow (GSL generation, full
-  PDF conformance report), TypedTS interface tests (the CTS 3.2.3 C suite
-  ships none), and the CSP/TPM/marshalling suites (interfaces this UoC does
+- Out of scope for this pass: literal GUI-driven test execution (see
+  below), and the CSP/TPM/marshalling suites (interfaces this UoC does
   not implement). Formal certification remains with an approved
   Verification Authority.
+
+### GUI launcher status (2026-09-14)
+
+The official GUI (`run_CTS_GUI.py` → `ConformanceTestSuiteGUI-1.6.jar`,
+a JavaFX app) was launched under Xvfb using Zulu JDK 8 with bundled
+JavaFX (the `JDK8_HOME` the launcher requires) plus a generated `.guicfg`
+settings file and a `python` → `python3` symlink the GUI's backend calls
+need. The Welcome screen renders and the "Run Conformance Test" button
+navigates to the "Run Segment Conformance Test" screen (screenshots in
+`your_files/tss-cts/`). JavaFX dropdown menus do not open in headless
+Xvfb, so File → Projects → Import could not be reached to load the
+`.pcfg` through the GUI. The GUI is a frontend over the same
+`face_conformance_app` engine driven to completion via CLI above.
 
 ## What was aligned (face-followups branch)
 
