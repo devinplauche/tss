@@ -1,0 +1,45 @@
+name: uop-scaffold
+
+# End-to-end check for the UoP scaffolder: build the TSS runtime, run the
+# scaffolder's unit tests, then run the worked sensor example
+# (generate -> build with -Werror -> ctest loopback).
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'tools/uop-scaffold/**'
+      - '.github/workflows/uop-scaffold.yml'
+      - 'c/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+  pull_request:
+    paths:
+      - 'tools/uop-scaffold/**'
+      - '.github/workflows/uop-scaffold.yml'
+  workflow_dispatch:
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc python3 python3-pytest
+
+      - name: Build TSS runtime
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - name: Scaffolder unit tests
+        run: |
+          cd tools/uop-scaffold
+          python3 -m pytest tests/ -q
+
+      - name: Worked sensor example
+        run: |
+          cd tools/uop-scaffold/examples/sensor
+          TSS_ROOT="$GITHUB_WORKSPACE" ./demo.sh
