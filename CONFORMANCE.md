@@ -227,6 +227,14 @@ Xvfb, so File → Projects → Import could not be reached to load the
   the subscription propagates are still dropped (inherent pub/sub).
 - **Threading**: callback stop/destroy locking follows the original design;
   not audited against FACE threading requirements.
+- **TPM**: the TPM is a local loopback model, not a real transport.
+  `Is_Data_Available` and `Read_From_Transport` honor their timeout
+  (ns, `TIMEOUT_INFINITE` = -1 blocks forever, 0 polls): they block until
+  data arrives on a listed channel or the timeout expires, using a
+  condition variable signaled by `Write_To_Transport` (channel
+  close/state change also wakes waiters). Expiry returns `NO_ERROR`
+  with an empty list from `Is_Data_Available` and `TIMED_OUT` from
+  `Read_From_Transport`. The TPM is C-only (no Python mirror).
 
 ## Remaining gaps (not started)
 - TSS distribution / multi-instance discovery beyond static config.
