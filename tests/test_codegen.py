@@ -70,33 +70,31 @@ def test_union_explicit_id_two_slots(tmp_path):
 
 
 @pytest.mark.parametrize("schema", [
-    # union with a non-table member
+    # vector of union with scalar member (not supported)
     """
     namespace X;
     table A { x:int; }
     union U { A, int }
-    table R { u:U; }
-    root_type R;
-    """,
-    # vector of union
-    """
-    namespace X;
-    table A { x:int; }
-    union U { A }
     table R { us:[U]; }
     root_type R;
     """,
-    # nested vector of non-scalar
+    # nested vector of tables (not supported)
     """
     namespace X;
     table A { x:int; }
     table R { m:[[A]]; }
     root_type R;
     """,
-    # nested vector of string
+    # nested vector depth 4 (exceeds max 3)
     """
     namespace X;
-    table R { m:[[string]]; }
+    table R { m:[[[[int]]]]; }
+    root_type R;
+    """,
+    # nested string vector depth 3 (max 2 for strings)
+    """
+    namespace X;
+    table R { m:[[[string]]]; }
     root_type R;
     """,
     # duplicate explicit id
@@ -142,3 +140,71 @@ def test_missing_root_defaults_to_last_table(tmp_path):
     _, root, _, _, _, _ = parse("namespace X;\ntable R { a:int; }\n",
                                 tmp_path)
     assert root == "R"
+
+
+def test_enum_without_base_defaults_int32(tmp_path):
+    _, _, _, tables, enums, _ = parse("""
+    namespace X;
+    enum E { A, B }
+    table R { e:E; }
+    root_type R;
+    """, tmp_path)
+    assert enums["E"].utype == "int32"
+    e = enums["E"]
+    assert [n for n, v in e.members] == ["A", "B"]
+    assert [v for n, v in e.members] == [0, 1]
+
+
+def test_nested_string_vector_ok(tmp_path):
+    _, _, _, tables, _, _ = parse("""
+    namespace X;
+    table R { m:[[string]]; }
+    root_type R;
+    """, tmp_path)
+    f = tables[0].fields[0]
+    assert f.kind == "vecvec"
+    assert f.velem == "string"
+    assert f.vdepth == 2
+
+
+def test_triple_nested_scalar_vector_ok(tmp_path):
+    _, _, _, tables, _, _ = parse("""
+    namespace X;
+    table R { m:[[[int]]]; }
+    root_type R;
+    """, tmp_path)
+    f = tables[0].fields[0]
+    assert f.kind == "vecvec"
+    assert f.velem == "scalar"
+    assert f.ftype == "int"
+    assert f.vdepth == 3
+
+
+def test_mixed_union_ok(tmp_path):
+    _, _, _, tables, _, unions = parse("""
+    namespace X;
+    table A { x:int; }
+    union U { string, int32, A }
+    table R { u:U; }
+    root_type R;
+    """, tmp_path)
+    u = unions["U"]
+    assert u.kinds == {"string": "string", "int32": "scalar", "A": "table"}
+    assert u.stypes["int32"] == "int32"
+
+
+def test_union_vector_ok(tmp_path):
+    _, _, _, tables, _, unions = parse("""
+    namespace X;
+    table A { x:int; }
+    union U { A, string }
+    table R { us:[U]; }
+    root_type R;
+    """, tmp_path)
+    r = tables[1]
+    f = r.fields[0]
+    assert f.kind == "vector"
+    assert f.velem == "union"
+    assert f.ref == "U"
+    # vector of union occupies two slots (types, values)
+    assert r.nslots == 2

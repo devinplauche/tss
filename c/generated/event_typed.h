@@ -22,7 +22,10 @@ typedef enum EventPayload {
 } EventPayload;
 typedef struct EventPayload_value {
     EventPayload type;
-    void *value; /* owned struct per type, NULL when NONE */
+    union {
+        struct SensorReading *SensorReading; /* owned, for EventPayload_SensorReading */
+        struct Alarm *Alarm; /* owned, for EventPayload_Alarm */
+    } value;
 } EventPayload_value;
 
 struct SensorReading;
@@ -44,18 +47,18 @@ typedef struct Summary {
     char *title; /* owned, freed by Event_fini */
     struct Alarm **items; /* owned array of owned */
     size_t items_count;
-    EventPayload_value last; /* owned, value NULL when type is EventPayload_NONE */
+    EventPayload_value last; /* owned; type is EventPayload_NONE when absent */
 } Summary;
 
 typedef struct Event {
     char *name; /* owned, freed by Event_fini */
-    EventPayload_value payload; /* owned, value NULL when type is EventPayload_NONE */
+    EventPayload_value payload; /* owned; type is EventPayload_NONE when absent */
     char **tags; /* owned array of owned */
     size_t tags_count;
     struct SensorReading **readings; /* owned array of owned */
     size_t readings_count;
-    float **matrix; /* owned array of owned arrays */
-    size_t *matrix_counts; /* per-row counts, owned */
+    float **matrix; /* owned, depth 2 */
+    size_t *matrix_counts; /* owned */
     size_t matrix_count;
     struct Summary *summary; /* owned, NULL if absent */
 } Event;

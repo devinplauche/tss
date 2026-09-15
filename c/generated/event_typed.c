@@ -134,21 +134,22 @@ static flatcc_builder_ref_t build_Summary(flatcc_builder_t *B, const struct Summ
     /* field 2/3: last (union EventPayload) */
     flatcc_builder_ref_t last_ref = 0;
     uint8_t last_type = EventPayload_NONE;
-    if (m->last.value) {
+    if (m->last.type != EventPayload_NONE) {
         switch (m->last.type) {
         case EventPayload_SensorReading:
-            last_ref = build_SensorReading(B, (const struct SensorReading *)m->last.value);
+            if (!m->last.value.SensorReading) return 0;
+            last_ref = build_SensorReading(B, m->last.value.SensorReading);
+            if (!last_ref) return 0;
             break;
         case EventPayload_Alarm:
-            last_ref = build_Alarm(B, (const struct Alarm *)m->last.value);
+            if (!m->last.value.Alarm) return 0;
+            last_ref = build_Alarm(B, m->last.value.Alarm);
+            if (!last_ref) return 0;
             break;
         default:
             return 0; /* unknown union discriminator */
         }
-        if (!last_ref) return 0;
         last_type = (uint8_t)m->last.type;
-    } else if (m->last.type != EventPayload_NONE) {
-        return 0; /* discriminator set but no value */
     }
     if (flatcc_builder_start_table(B, 4)) return 0;
     /* field 0: title */
@@ -164,11 +165,11 @@ static flatcc_builder_ref_t build_Summary(flatcc_builder_t *B, const struct Summ
         *pref = items_ref;
     }
     /* field 2/3: last */
-    if (last_ref) {
+    if (last_type != EventPayload_NONE) {
         uint8_t *tslot = (uint8_t *)flatcc_builder_table_add(B, 2, 1, 1);
-        flatcc_builder_ref_t *pref;
         if (!tslot) return 0;
         *tslot = last_type;
+        flatcc_builder_ref_t *pref;
         pref = flatcc_builder_table_add_offset(B, 3);
         if (!pref) return 0;
         *pref = last_ref;
@@ -187,21 +188,22 @@ static flatcc_builder_ref_t build_Event(flatcc_builder_t *B, const struct Event 
     /* field 2/3: payload (union EventPayload) */
     flatcc_builder_ref_t payload_ref = 0;
     uint8_t payload_type = EventPayload_NONE;
-    if (m->payload.value) {
+    if (m->payload.type != EventPayload_NONE) {
         switch (m->payload.type) {
         case EventPayload_SensorReading:
-            payload_ref = build_SensorReading(B, (const struct SensorReading *)m->payload.value);
+            if (!m->payload.value.SensorReading) return 0;
+            payload_ref = build_SensorReading(B, m->payload.value.SensorReading);
+            if (!payload_ref) return 0;
             break;
         case EventPayload_Alarm:
-            payload_ref = build_Alarm(B, (const struct Alarm *)m->payload.value);
+            if (!m->payload.value.Alarm) return 0;
+            payload_ref = build_Alarm(B, m->payload.value.Alarm);
+            if (!payload_ref) return 0;
             break;
         default:
             return 0; /* unknown union discriminator */
         }
-        if (!payload_ref) return 0;
         payload_type = (uint8_t)m->payload.type;
-    } else if (m->payload.type != EventPayload_NONE) {
-        return 0; /* discriminator set but no value */
     }
     /* field 7: tags (vector of strings) */
     flatcc_builder_ref_t tags_ref = 0;
@@ -238,19 +240,19 @@ static flatcc_builder_ref_t build_Event(flatcc_builder_t *B, const struct Event 
     /* field 4: matrix ([[float]]) */
     flatcc_builder_ref_t matrix_ref = 0;
     if (m->matrix && m->matrix_count > 0) {
-        size_t _n;
+        size_t _n0;
         if (flatcc_builder_start_offset_vector(B)) return 0;
-        for (_n = 0; _n < m->matrix_count; _n++) {
-            flatcc_builder_ref_t _r;
-            if (m->matrix[_n] && m->matrix_counts[_n] > 0)
-                _r = flatcc_builder_create_vector(
-                    B, m->matrix[_n], m->matrix_counts[_n], 4, 4, 16777215);
+        for (_n0 = 0; _n0 < m->matrix_count; _n0++) {
+            flatcc_builder_ref_t _r0;
+            if (m->matrix[_n0] && m->matrix_counts[_n0] > 0)
+                _r0 = flatcc_builder_create_vector(
+                    B, m->matrix[_n0], m->matrix_counts[_n0], 4, 4, 16777215);
             else
                 /* empty inner: emit a real empty vector (null refs are invalid) */
-                _r = flatcc_builder_create_vector(
+                _r0 = flatcc_builder_create_vector(
                     B, "", 0, 4, 4, 16777215);
-            if (!_r) return 0;
-            if (!flatcc_builder_offset_vector_push(B, _r))
+            if (!_r0) return 0;
+            if (!flatcc_builder_offset_vector_push(B, _r0))
                 return 0;
         }
         matrix_ref = flatcc_builder_end_offset_vector(B);
@@ -270,11 +272,11 @@ static flatcc_builder_ref_t build_Event(flatcc_builder_t *B, const struct Event 
         *pref = name_ref;
     }
     /* field 2/3: payload */
-    if (payload_ref) {
+    if (payload_type != EventPayload_NONE) {
         uint8_t *tslot = (uint8_t *)flatcc_builder_table_add(B, 2, 1, 1);
-        flatcc_builder_ref_t *pref;
         if (!tslot) return 0;
         *tslot = payload_type;
+        flatcc_builder_ref_t *pref;
         pref = flatcc_builder_table_add_offset(B, 3);
         if (!pref) return 0;
         *pref = payload_ref;
@@ -334,19 +336,21 @@ static void fini_Summary(struct Summary *m)
         free(m->items); m->items = NULL;
     }
     m->items_count = 0;
-    if (m->last.value) {
-        switch (m->last.type) {
-        case EventPayload_SensorReading:
-            fini_SensorReading((struct SensorReading *)m->last.value);
-            break;
-        case EventPayload_Alarm:
-            fini_Alarm((struct Alarm *)m->last.value);
-            break;
-        default:
-            break;
+    switch (m->last.type) {
+    case EventPayload_SensorReading:
+        if (m->last.value.SensorReading) {
+            fini_SensorReading(m->last.value.SensorReading);
+            free(m->last.value.SensorReading);
         }
-        free(m->last.value);
-        m->last.value = NULL;
+        break;
+    case EventPayload_Alarm:
+        if (m->last.value.Alarm) {
+            fini_Alarm(m->last.value.Alarm);
+            free(m->last.value.Alarm);
+        }
+        break;
+    default:
+        break;
     }
     m->last.type = EventPayload_NONE;
 }
@@ -355,19 +359,21 @@ static void fini_Event(struct Event *m)
 {
     if (!m) return;
     free(m->name); m->name = NULL;
-    if (m->payload.value) {
-        switch (m->payload.type) {
-        case EventPayload_SensorReading:
-            fini_SensorReading((struct SensorReading *)m->payload.value);
-            break;
-        case EventPayload_Alarm:
-            fini_Alarm((struct Alarm *)m->payload.value);
-            break;
-        default:
-            break;
+    switch (m->payload.type) {
+    case EventPayload_SensorReading:
+        if (m->payload.value.SensorReading) {
+            fini_SensorReading(m->payload.value.SensorReading);
+            free(m->payload.value.SensorReading);
         }
-        free(m->payload.value);
-        m->payload.value = NULL;
+        break;
+    case EventPayload_Alarm:
+        if (m->payload.value.Alarm) {
+            fini_Alarm(m->payload.value.Alarm);
+            free(m->payload.value.Alarm);
+        }
+        break;
+    default:
+        break;
     }
     m->payload.type = EventPayload_NONE;
     if (m->tags) {
@@ -574,33 +580,43 @@ static FACE_TSS_RETURN_CODE parse_Summary(const uint8_t *buf, size_t len, uint32
             _vent = field_at(buf, vtable, vsize, 3);
             if (!_vent)
                 { fini_Summary(m); return FACE_TSS_RC_INVALID_PARAM; } /* type set but no value */
-            if (_vent + 4 > tsize)
-                return FACE_TSS_RC_INVALID_PARAM;
-            at = table + _vent;
-            if (at > (uint32_t)(len - 4))
-                return FACE_TSS_RC_INVALID_PARAM;
-            _voff = rd_u32(buf + at);
-            if (_voff == 0 || _voff > (uint32_t)(len - at - 4))
-                return FACE_TSS_RC_INVALID_PARAM;
-            _vnat = at + _voff;
             switch (_ut) {
             case EventPayload_SensorReading:
-                m->last.value = calloc(1, sizeof(struct SensorReading));
-                if (!m->last.value) { fini_Summary(m);
+                if (_vent + 4 > tsize)
+                    return FACE_TSS_RC_INVALID_PARAM;
+                at = table + _vent;
+                if (at > (uint32_t)(len - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _voff = rd_u32(buf + at);
+                if (_voff == 0 || _voff > (uint32_t)(len - at - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _vnat = at + _voff;
+                m->last.value.SensorReading = calloc(1, sizeof(struct SensorReading));
+                if (!m->last.value.SensorReading) { fini_Summary(m);
                     return FACE_TSS_RC_NOT_AVAILABLE; }
-                rc = parse_SensorReading(buf, len, _vnat, (struct SensorReading *)m->last.value);
+                rc = parse_SensorReading(buf, len, _vnat, (struct SensorReading *)m->last.value.SensorReading);
+                if (rc != FACE_TSS_RC_NO_ERROR) { fini_Summary(m); return rc; }
                 break;
             case EventPayload_Alarm:
-                m->last.value = calloc(1, sizeof(struct Alarm));
-                if (!m->last.value) { fini_Summary(m);
+                if (_vent + 4 > tsize)
+                    return FACE_TSS_RC_INVALID_PARAM;
+                at = table + _vent;
+                if (at > (uint32_t)(len - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _voff = rd_u32(buf + at);
+                if (_voff == 0 || _voff > (uint32_t)(len - at - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _vnat = at + _voff;
+                m->last.value.Alarm = calloc(1, sizeof(struct Alarm));
+                if (!m->last.value.Alarm) { fini_Summary(m);
                     return FACE_TSS_RC_NOT_AVAILABLE; }
-                rc = parse_Alarm(buf, len, _vnat, (struct Alarm *)m->last.value);
+                rc = parse_Alarm(buf, len, _vnat, (struct Alarm *)m->last.value.Alarm);
+                if (rc != FACE_TSS_RC_NO_ERROR) { fini_Summary(m); return rc; }
                 break;
             default:
                 fini_Summary(m);
                 return FACE_TSS_RC_INVALID_PARAM; /* unknown discriminator */
             }
-            if (rc != FACE_TSS_RC_NO_ERROR) { fini_Summary(m); return rc; }
             m->last.type = (EventPayload)_ut;
         }
     }
@@ -653,33 +669,43 @@ static FACE_TSS_RETURN_CODE parse_Event(const uint8_t *buf, size_t len, uint32_t
             _vent = field_at(buf, vtable, vsize, 3);
             if (!_vent)
                 { fini_Event(m); return FACE_TSS_RC_INVALID_PARAM; } /* type set but no value */
-            if (_vent + 4 > tsize)
-                return FACE_TSS_RC_INVALID_PARAM;
-            at = table + _vent;
-            if (at > (uint32_t)(len - 4))
-                return FACE_TSS_RC_INVALID_PARAM;
-            _voff = rd_u32(buf + at);
-            if (_voff == 0 || _voff > (uint32_t)(len - at - 4))
-                return FACE_TSS_RC_INVALID_PARAM;
-            _vnat = at + _voff;
             switch (_ut) {
             case EventPayload_SensorReading:
-                m->payload.value = calloc(1, sizeof(struct SensorReading));
-                if (!m->payload.value) { fini_Event(m);
+                if (_vent + 4 > tsize)
+                    return FACE_TSS_RC_INVALID_PARAM;
+                at = table + _vent;
+                if (at > (uint32_t)(len - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _voff = rd_u32(buf + at);
+                if (_voff == 0 || _voff > (uint32_t)(len - at - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _vnat = at + _voff;
+                m->payload.value.SensorReading = calloc(1, sizeof(struct SensorReading));
+                if (!m->payload.value.SensorReading) { fini_Event(m);
                     return FACE_TSS_RC_NOT_AVAILABLE; }
-                rc = parse_SensorReading(buf, len, _vnat, (struct SensorReading *)m->payload.value);
+                rc = parse_SensorReading(buf, len, _vnat, (struct SensorReading *)m->payload.value.SensorReading);
+                if (rc != FACE_TSS_RC_NO_ERROR) { fini_Event(m); return rc; }
                 break;
             case EventPayload_Alarm:
-                m->payload.value = calloc(1, sizeof(struct Alarm));
-                if (!m->payload.value) { fini_Event(m);
+                if (_vent + 4 > tsize)
+                    return FACE_TSS_RC_INVALID_PARAM;
+                at = table + _vent;
+                if (at > (uint32_t)(len - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _voff = rd_u32(buf + at);
+                if (_voff == 0 || _voff > (uint32_t)(len - at - 4))
+                    return FACE_TSS_RC_INVALID_PARAM;
+                _vnat = at + _voff;
+                m->payload.value.Alarm = calloc(1, sizeof(struct Alarm));
+                if (!m->payload.value.Alarm) { fini_Event(m);
                     return FACE_TSS_RC_NOT_AVAILABLE; }
-                rc = parse_Alarm(buf, len, _vnat, (struct Alarm *)m->payload.value);
+                rc = parse_Alarm(buf, len, _vnat, (struct Alarm *)m->payload.value.Alarm);
+                if (rc != FACE_TSS_RC_NO_ERROR) { fini_Event(m); return rc; }
                 break;
             default:
                 fini_Event(m);
                 return FACE_TSS_RC_INVALID_PARAM; /* unknown discriminator */
             }
-            if (rc != FACE_TSS_RC_NO_ERROR) { fini_Event(m); return rc; }
             m->payload.type = (EventPayload)_ut;
         }
     }

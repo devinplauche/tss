@@ -23,14 +23,17 @@ foreach(t envelope config config_service lifecycle live conformance extended thr
 endforeach()
 
 # Typed interface test: compiles the codegen'd PositionReport wrapper
-# (flat schema), the Telemetry wrapper (nested table, vector, enum), and
-# the Event wrapper (unions, vectors of tables/strings, nested vectors,
-# explicit field ids) from c/schemas/kitchen_sink.fbs.
+# (flat schema), the Telemetry wrapper (nested table, vector, enum), the
+# Event wrapper (unions, vectors of tables/strings, nested vectors,
+# explicit field ids) from c/schemas/kitchen_sink.fbs, and the Advanced
+# wrapper (nested string vectors, triple-nested scalars, bare enums,
+# mixed unions, vectors of unions) from c/schemas/advanced.fbs.
 add_executable(face_tss_test_typed
     test_typed.c
     ${CMAKE_SOURCE_DIR}/c/generated/positionreport_typed.c
     ${CMAKE_SOURCE_DIR}/c/generated/telemetry_typed.c
-    ${CMAKE_SOURCE_DIR}/c/generated/event_typed.c)
+    ${CMAKE_SOURCE_DIR}/c/generated/event_typed.c
+    ${CMAKE_SOURCE_DIR}/c/generated/advanced_typed.c)
 target_include_directories(face_tss_test_typed PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/c/include

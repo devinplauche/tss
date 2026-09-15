@@ -24,6 +24,7 @@ static void msleep(long ms)
 #include "positionreport_typed.h"
 #include "telemetry_typed.h"
 #include "event_typed.h"
+#include "advanced_typed.h"
 
 #include <stdlib.h>
 
@@ -471,7 +472,7 @@ static void t_codegen_advanced(void)
     al->code = 7;
     al->message = ks_dup("boom");
     out.payload.type = EventPayload_Alarm;
-    out.payload.value = al;
+    out.payload.value.Alarm = al;
 
     /* tags: [string] (id 7). */
     out.tags_count = 3;
@@ -521,7 +522,7 @@ static void t_codegen_advanced(void)
     sr2->value = 9.9;
     sr2->unit = ks_dup("km");
     sum->last.type = EventPayload_SensorReading;
-    sum->last.value = sr2;
+    sum->last.value.SensorReading = sr2;
     out.summary = sum;
 
     CHECK_RC(Event_serialize(&out, &payload, &payload_len),
@@ -534,9 +535,9 @@ static void t_codegen_advanced(void)
     CHECK(strcmp(back.name, "evt-1") == 0);
     /* union */
     CHECK(back.payload.type == EventPayload_Alarm);
-    CHECK(back.payload.value != NULL);
-    CHECK(((struct Alarm *)back.payload.value)->code == 7);
-    CHECK(strcmp(((struct Alarm *)back.payload.value)->message, "boom") == 0);
+    CHECK(back.payload.value.Alarm != NULL);
+    CHECK(back.payload.value.Alarm->code == 7);
+    CHECK(strcmp(back.payload.value.Alarm->message, "boom") == 0);
     /* [string] */
     CHECK(back.tags_count == 3);
     CHECK(strcmp(back.tags[0], "a") == 0);
@@ -561,8 +562,8 @@ static void t_codegen_advanced(void)
     CHECK(back.summary->items[0]->code == 1);
     CHECK(strcmp(back.summary->items[0]->message, "x") == 0);
     CHECK(back.summary->last.type == EventPayload_SensorReading);
-    CHECK(((struct SensorReading *)back.summary->last.value)->value == 9.9);
-    CHECK(strcmp(((struct SensorReading *)back.summary->last.value)->unit,
+    CHECK(back.summary->last.value.SensorReading->value == 9.9);
+    CHECK(strcmp(back.summary->last.value.SensorReading->unit,
                  "km") == 0);
     Event_fini(&back);
     Event_fini(&out);
@@ -589,7 +590,7 @@ static void t_codegen_advanced(void)
                  FACE_TSS_RC_NO_ERROR);
         CHECK(strcmp(sparse_back.name, "only-name") == 0);
         CHECK(sparse_back.payload.type == EventPayload_NONE);
-        CHECK(sparse_back.payload.value == NULL);
+        /* value union is untouched when type is NONE */
         CHECK(sparse_back.tags == NULL && sparse_back.tags_count == 0);
         CHECK(sparse_back.readings == NULL &&
               sparse_back.readings_count == 0);
@@ -613,7 +614,7 @@ static void t_codegen_advanced(void)
         al2->code = 3;
         al2->message = ks_dup("z");
         with_union.payload.type = EventPayload_Alarm;
-        with_union.payload.value = al2;
+        with_union.payload.value.Alarm = al2;
         CHECK_RC(Event_serialize(&with_union, &p3, &l3),
                  FACE_TSS_RC_NO_ERROR);
         root = ks_rd32(p3);
@@ -670,6 +671,141 @@ static void t_typed_unregister(void)
     TEST_END();
 }
 
+static void t_codegen_new_features(void)
+{
+    struct Advanced out, back;
+    uint8_t *payload = NULL;
+    size_t payload_len = 0;
+    struct Point *pt;
+    TEST_BEGIN("codegen_new_features");
+
+    memset(&out, 0, sizeof(out));
+
+    /* [[string]]: 2 rows, 2 and 1 strings. */
+    out.names_count = 2;
+    out.names = (char ***)calloc(2, sizeof(char **));
+    out.names_counts = (size_t *)calloc(2, sizeof(size_t));
+    out.names[0] = (char **)calloc(2, sizeof(char *));
+    out.names[0][0] = ks_dup("a");
+    out.names[0][1] = ks_dup("bb");
+    out.names_counts[0] = 2;
+    out.names[1] = (char **)calloc(1, sizeof(char *));
+    out.names[1][0] = ks_dup("ccc");
+    out.names_counts[1] = 1;
+
+    /* [[[int]]]: 1 x 2 x 3 cube. */
+    out.cube_count = 1;
+    out.cube = (int32_t ***)calloc(1, sizeof(int32_t **));
+    out.cube_counts2 = (size_t *)calloc(1, sizeof(size_t));
+    out.cube_counts = (size_t **)calloc(1, sizeof(size_t *));
+    out.cube_counts2[0] = 2;
+    out.cube[0] = (int32_t **)calloc(2, sizeof(int32_t *));
+    out.cube_counts[0] = (size_t *)calloc(2, sizeof(size_t));
+    out.cube_counts[0][0] = 3;
+    out.cube[0][0] = (int32_t *)malloc(3 * sizeof(int32_t));
+    out.cube[0][0][0] = 1; out.cube[0][0][1] = 2; out.cube[0][0][2] = 3;
+    out.cube_counts[0][1] = 1;
+    out.cube[0][1] = (int32_t *)malloc(sizeof(int32_t));
+    out.cube[0][1][0] = 42;
+
+    /* bare enum (defaults to int32). */
+    out.color = Color_BLUE;
+
+    /* mixed union with scalar member. */
+    out.mixed.type = Mixed_int32;
+    out.mixed.value.int32 = -7;
+
+    /* vector of unions: [Point, string]. */
+    out.items_count = 2;
+    out.items = (Simple_value *)calloc(2, sizeof(Simple_value));
+    pt = (struct Point *)calloc(1, sizeof(*pt));
+    pt->x = 3; pt->y = 4;
+    out.items[0].type = Simple_Point;
+    out.items[0].value.Point = pt;
+    out.items[1].type = Simple_string;
+    out.items[1].value.string = ks_dup("hi");
+
+    CHECK_RC(Advanced_serialize(&out, &payload, &payload_len),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(payload != NULL && payload_len > 0);
+
+    memset(&back, 0, sizeof(back));
+    CHECK_RC(Advanced_deserialize(payload, payload_len, &back),
+             FACE_TSS_RC_NO_ERROR);
+
+    /* [[string]] round trip. */
+    CHECK(back.names_count == 2);
+    CHECK(back.names_counts[0] == 2);
+    CHECK(strcmp(back.names[0][0], "a") == 0);
+    CHECK(strcmp(back.names[0][1], "bb") == 0);
+    CHECK(back.names_counts[1] == 1);
+    CHECK(strcmp(back.names[1][0], "ccc") == 0);
+
+    /* [[[int]]] round trip. */
+    CHECK(back.cube_count == 1);
+    CHECK(back.cube_counts2[0] == 2);
+    CHECK(back.cube_counts[0][0] == 3);
+    CHECK(back.cube[0][0][0] == 1);
+    CHECK(back.cube[0][0][1] == 2);
+    CHECK(back.cube[0][0][2] == 3);
+    CHECK(back.cube_counts[0][1] == 1);
+    CHECK(back.cube[0][1][0] == 42);
+
+    /* bare enum. */
+    CHECK(back.color == Color_BLUE);
+
+    /* mixed union scalar. */
+    CHECK(back.mixed.type == Mixed_int32);
+    CHECK(back.mixed.value.int32 == -7);
+
+    /* vector of unions. */
+    CHECK(back.items_count == 2);
+    CHECK(back.items[0].type == Simple_Point);
+    CHECK(back.items[0].value.Point->x == 3);
+    CHECK(back.items[0].value.Point->y == 4);
+    CHECK(back.items[1].type == Simple_string);
+    CHECK(strcmp(back.items[1].value.string, "hi") == 0);
+
+    Advanced_fini(&back);
+    Advanced_fini(&out);
+    free(payload);
+
+    /* mixed union with string member. */
+    memset(&out, 0, sizeof(out));
+    out.mixed.type = Mixed_string;
+    out.mixed.value.string = ks_dup("union-str");
+    CHECK_RC(Advanced_serialize(&out, &payload, &payload_len),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&back, 0, sizeof(back));
+    CHECK_RC(Advanced_deserialize(payload, payload_len, &back),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(back.mixed.type == Mixed_string);
+    CHECK(strcmp(back.mixed.value.string, "union-str") == 0);
+    Advanced_fini(&back);
+    Advanced_fini(&out);
+    free(payload);
+
+    /* mixed union with table member. */
+    memset(&out, 0, sizeof(out));
+    pt = (struct Point *)calloc(1, sizeof(*pt));
+    pt->x = 9; pt->y = 8;
+    out.mixed.type = Mixed_Point;
+    out.mixed.value.Point = pt;
+    CHECK_RC(Advanced_serialize(&out, &payload, &payload_len),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&back, 0, sizeof(back));
+    CHECK_RC(Advanced_deserialize(payload, payload_len, &back),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(back.mixed.type == Mixed_Point);
+    CHECK(back.mixed.value.Point->x == 9);
+    CHECK(back.mixed.value.Point->y == 8);
+    Advanced_fini(&back);
+    Advanced_fini(&out);
+    free(payload);
+
+    TEST_END();
+}
+
 int main(void)
 {
     printf("[typed]\n");
@@ -680,5 +816,6 @@ int main(void)
     t_typed_guid_mismatch();
     t_codegen_extensions();
     t_codegen_advanced();
+    t_codegen_new_features();
     return TEST_SUMMARY();
 }

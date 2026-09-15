@@ -1,0 +1,36 @@
+// Advanced codegen features: nested vectors, bare enums, mixed unions,
+// vectors of unions.
+namespace FaceTSS;
+
+enum Color { RED, GREEN, BLUE }
+
+table Point {
+  x:int;
+  y:int;
+}
+
+union Mixed {
+  string,
+  int32,
+  Point
+}
+
+union Simple {
+  Point,
+  string
+}
+
+table Advanced {
+  // [[string]]: nested vector of strings
+  names:[[string]];
+  // [[[int]]]: triple-nested scalar vector
+  cube:[[[int]]];
+  // bare enum (defaults to int32)
+  color:Color;
+  // mixed union: string, scalar, table
+  mixed:Mixed;
+  // vector of unions (tables and strings only)
+  items:[Simple];
+}
+
+root_type Advanced;

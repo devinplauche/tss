@@ -256,11 +256,15 @@ Xvfb, so File → Projects → Import could not be reached to load the
   injection path.
 - **Connection scope**: `Create_Connection` takes a bare name; no
   `CONNECTION_ID` typedef plumbing beyond the integer ID.
-- **Codegen limits**: non-table union members, vectors of unions, nested
-  non-scalar vectors, non-integral-backed enums, and unknown types are
-  rejected. Supported: multiple tables per file, nested tables, scalar
-  vectors, enums with explicit integral base, unions of tables, vectors
-  of tables/strings, nested scalar vectors, and explicit field ids
+- **Codegen limits**: vectors of tables inside nested vectors
+  (e.g. `[[MyTable]]`), nesting deeper than 3 levels, and `[[[string]]]`
+  are rejected. Supported: multiple tables per file, nested tables,
+  scalar vectors, string vectors, nested scalar vectors (up to 3 levels)
+  and nested string vectors (up to 2 levels), enums with explicit
+  integral base or defaulted to `int32`, unions of tables, unions with
+  mixed scalar/string/table members, vectors of tables/strings, vectors
+  of unions (table/string members only; two vtable slots per the
+  FlatBuffers parallel-vector encoding), and explicit field ids
   (all-or-none per table; `[[scalar]]` nested vectors are this
   implementation's own extension, verified by round-trip tests, not by
   interop with the official flatc compiler).
@@ -300,7 +304,6 @@ Xvfb, so File → Projects → Import could not be reached to load the
 
 ## Remaining gaps (not started)
 - TSS distribution / multi-instance discovery beyond static config.
-- Type abstraction beyond the codegen subset.
 - Any safety/security certification artifacts.
 - The FACE CTS itself.
 
