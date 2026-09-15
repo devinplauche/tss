@@ -587,7 +587,8 @@ FACE_TSS_RETURN_CODE face_tss_priv_send_guid(
         *transaction_id = tss->next_txn++;
     c->send_seq++;
     face_tss_envelope_init(&env);
-    strncpy(env.connection_name, c->cfg.name, sizeof(env.connection_name) - 1);
+    memcpy(env.connection_name, c->cfg.name, sizeof(env.connection_name));
+    env.connection_name[sizeof(env.connection_name) - 1] = '\0';
     env.transaction_id = *transaction_id;
     env.source_id = tss->source_id;
     env.sequence_number = c->send_seq;

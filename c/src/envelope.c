@@ -9,6 +9,7 @@
  */
 
 #include "face_tss/envelope.h"
+#include "face_tss/config.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -349,7 +350,7 @@ FACE_TSS_RETURN_CODE face_tss_envelope_decode(
         uint16_t _e = vt_entry(buf, vtable, vsize, (fid));               \
         if (_e != 0) {                                                   \
             uint32_t _at;                                                \
-            if (_e + 8 > tsize)                                          \
+            if ((uint32_t)_e + 8 > tsize)                                \
                 return FACE_TSS_RC_INVALID_PARAM;                        \
             _at = table + _e;                                            \
             if (_at > (uint32_t)(len - 8))                               \
@@ -376,7 +377,7 @@ FACE_TSS_RETURN_CODE face_tss_envelope_decode(
     {
         uint16_t _e = vt_entry(buf, vtable, vsize, F_PAYLOAD);
         if (_e != 0) {
-            if (_e + 4 > tsize)
+            if ((uint32_t)_e + 4 > tsize)
                 return FACE_TSS_RC_INVALID_PARAM;
             foff = table + _e;
         }

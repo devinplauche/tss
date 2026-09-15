@@ -49,7 +49,9 @@ typedef bool     FACE_Boolean;
 /* 64-bit signed integer with 1 nanosecond resolution. */
 typedef int64_t FACE_SYSTEM_TIME_TYPE;
 /* "wait forever" timeout sentinel. */
+#ifndef FACE_INF_TIME_VALUE
 #define FACE_INF_TIME_VALUE ((FACE_SYSTEM_TIME_TYPE)-1)
+#endif
 
 /* Timeout type: int64 nanoseconds; FACE_INF_TIME_VALUE waits forever. */
 typedef FACE_SYSTEM_TIME_TYPE FACE_TIMEOUT_TYPE;

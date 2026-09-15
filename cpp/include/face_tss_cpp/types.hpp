@@ -39,7 +39,9 @@ private:
 
 /* FACE::TIMEOUT_TYPE: nanoseconds; -1 = infinite. */
 typedef int64_t TIMEOUT_TYPE;
+#ifndef FACE_INF_TIME_VALUE
 #define FACE_INF_TIME_VALUE ((FACE::TIMEOUT_TYPE)-1)
+#endif
 
 typedef int64_t UID_TYPE;
 

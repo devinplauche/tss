@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <flatcc/flatcc_builder.h>
 #include <nng/nng.h>
 #include <nng/protocol/bus0/bus.h>
 #include <nng/protocol/pubsub0/pub.h>
