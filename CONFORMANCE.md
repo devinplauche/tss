@@ -89,6 +89,18 @@ Scope and limitations (read before citing these results):
   Authority. This project is **not certified** and must not be described
   as certified or fully conformant.
 
+## CTS 3.2.3 re-run (2026-09-15)
+
+Re-ran the full `conformance_test.py face_tss.pcfg` workflow against the
+current tree after the Configuration/TPM/codegen/discovery enhancements:
+exit code **0**, Data Model (4/4) and TS Segment (Base 3/3, Typed 12/12,
+POSIX fork) all **PASSED** — identical to the 2026-09-14 result. The
+28-page report is committed at
+`docs/certification/FACEConformanceTest_face_tss_2026-09-15.pdf`
+(45 PASSED, 0 FAILED, 0 not-performed). Same scope and limitations as
+above: link-level interface checks against the CTS-local stub adapter,
+not functional runs of the production library, and not certification.
+
 ## Earlier CTS 3.2.3 self-test (2026-09-14, superseded by the full run above)
 
 The official FACE Conformance Test Suite 3.2.3 distribution was downloaded
