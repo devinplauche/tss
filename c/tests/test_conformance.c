@@ -129,7 +129,12 @@ static void t_create_connection_errors(void)
     int i, created = 0;
 
     TEST_BEGIN("create_connection_errors");
-    t = make_tss("t", "C", "tcp://127.0.0.1:51961");
+    /* Use inproc:// for the 64-connection storm: nng 1.12.3's TCP
+     * transport has intermittent teardown races (leaked accept/dial
+     * state) when dozens of connections are created and destroyed
+     * rapidly, which flakes ASan/LSan. The 64-connection limit is
+     * enforced by our code and is transport-agnostic. */
+    t = make_tss("t", "C", "inproc://conn-errors");
     CHECK(t != NULL);
 
     /* Unknown name -> INVALID_PARAM. */
@@ -333,7 +338,6 @@ static void t_configuration_errors(void)
 /* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
-
 int main(void)
 {
     printf("[face_tss_conformance]\n");
