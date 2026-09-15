@@ -1,0 +1,41 @@
+# sensor_uop component descriptor (scaffolder input format, Phase-0 draft)
+#
+# This is the input the generator will consume in Phase 1/2. The two C files
+# beside it are the hand-written "expected output" for this descriptor.
+uop:
+  name: sensor_uop
+  language: c99
+  profile: general_purpose
+
+  types:
+    - name: raw_detection
+      fields:
+        - name: x
+          type: int32
+        - name: y
+          type: int32
+    - name: fused_track
+      fields:
+        - name: x
+          type: int32
+        - name: y
+          type: int32
+        - name: track_id
+          type: int32
+
+  connections:
+    - name: RAW_DETECTION
+      direction: destination      # this UoP only receives
+      transport: pubsub
+      role: subscriber
+      type: raw_detection
+      callback: on_raw_detection
+    - name: FUSED_TRACK
+      direction: source           # this UoP only sends
+      transport: pubsub
+      role: publisher
+      type: fused_track
+
+# Phase-0 note: addresses (tcp://127.0.0.1:<port>) are deployment config,
+# supplied at run time (argv) — not part of the component descriptor.
+# The .pcfg emission for CTS-style project packaging is a Phase-2 template.
