@@ -38,6 +38,48 @@ static void check_equal(const FACE_TSS_ENVELOPE *a, const FACE_TSS_ENVELOPE *b)
     CHECK(a->payload_len == b->payload_len);
     CHECK(a->payload_len == 0 ||
           memcmp(a->payload, b->payload, a->payload_len) == 0);
+    CHECK(a->priority == b->priority);
+}
+
+static void t_priority(void)
+{
+    FACE_TSS_ENVELOPE e = make_env(), back;
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    TEST_BEGIN("round_trip_priority");
+    e.priority = 7;
+    CHECK_RC(face_tss_envelope_encode(&e, &buf, &len), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_envelope_decode(buf, len, &back), FACE_TSS_RC_NO_ERROR);
+    check_equal(&e, &back);
+    CHECK(back.priority == 7);
+    face_tss_envelope_fini(&back);
+    free(buf);
+    /* negative values are representable (signed 64-bit field). */
+    e.priority = -1;
+    CHECK_RC(face_tss_envelope_encode(&e, &buf, &len), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_envelope_decode(buf, len, &back), FACE_TSS_RC_NO_ERROR);
+    CHECK(back.priority == -1);
+    face_tss_envelope_fini(&back);
+    free(buf);
+    face_tss_envelope_fini(&e);
+    TEST_END();
+}
+
+static void t_priority_default(void)
+{
+    FACE_TSS_ENVELOPE e = make_env(), back;
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    TEST_BEGIN("absent_priority_decodes_as_zero");
+    /* make_env leaves priority at 0, which the encoder omits; the
+     * decoder must still report 0 (backward-compatible default). */
+    CHECK_RC(face_tss_envelope_encode(&e, &buf, &len), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_envelope_decode(buf, len, &back), FACE_TSS_RC_NO_ERROR);
+    CHECK(back.priority == 0);
+    face_tss_envelope_fini(&back);
+    free(buf);
+    face_tss_envelope_fini(&e);
+    TEST_END();
 }
 
 static void t_round_trip(void)
@@ -131,5 +173,7 @@ int main(void)
     t_large();
     t_topic();
     t_corrupt();
+    t_priority();
+    t_priority_default();
     return TEST_SUMMARY();
 }

@@ -25,6 +25,8 @@ table TssEnvelope {
   payload:[ubyte];          // 5: opaque typed message bytes
   message_guid:long;        // 6: FACE MESSAGE_GUID_TYPE (0 = untyped)
   instance_uid:long;        // 7: FACE per-message instance UID
+  priority:long;            // 8: sender priority (FACE_TSS_QOS_PRIORITY
+                            //    policy value); 0 = default/lowest
 }
 
 root_type TssEnvelope;

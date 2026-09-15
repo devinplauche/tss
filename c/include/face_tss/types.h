@@ -147,8 +147,10 @@ typedef struct FACE_TSS_QOS_ELEMENT {
 } FACE_TSS_QOS_ELEMENT;
 
 /* Maximum QoS elements carried per message. This implementation reports no
- * QoS *policies*; each receive populates one honest, transport-observable
- * element ("message_age_ns"). No staleness policy is enforced. */
+ * QoS *policies* in the event; each receive populates honest,
+ * transport-observable elements ("message_age_ns", "priority", plus
+ * "sequence_gap" when reliability monitoring is active). The staleness
+ * and priority policies are enforced on the receive path. */
 #define FACE_TSS_MAX_QOS_ELEMENTS 16
 
 /* Maximum simultaneously open connections per TSS instance. Exceeding it

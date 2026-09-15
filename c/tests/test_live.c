@@ -110,7 +110,9 @@ static void t_pubsub_round_trip(void)
     CHECK(m.header.instance_uid != 0);
     CHECK(m.header.source_uid == face_tss_source_id(pub));
     CHECK(m.header.timestamp > 0);
-    CHECK(qos.count == 1); /* message_age_ns element */
+    CHECK(qos.count == 2); /* message_age_ns + priority */
+    CHECK(strcmp(qos.elements[1].keyname, "priority") == 0);
+    CHECK(strcmp(qos.elements[1].value, "0") == 0);
     CHECK(strcmp(qos.elements[0].keyname, "message_age_ns") == 0);
     first_iuid = m.header.instance_uid;
     face_tss_message_fini(&m);
@@ -376,8 +378,10 @@ static void t_receive_into(void)
     CHECK(hdr.source_uid == face_tss_source_id(pub));
     CHECK(hdr.timestamp > 0);
     CHECK(guid == FACE_TSS_MESSAGE_GUID_UNSPECIFIED);
-    CHECK(qos.count == 1);
+    CHECK(qos.count == 2);
     CHECK(strcmp(qos.elements[0].keyname, "message_age_ns") == 0);
+    CHECK(strcmp(qos.elements[1].keyname, "priority") == 0);
+    CHECK(strcmp(qos.elements[1].value, "0") == 0);
 
     /* Zero-length payload: NULL buffer with capacity 0 works. */
     txn = 23;
@@ -671,6 +675,210 @@ static void t_qos_staleness(void)
     TEST_END();
 }
 
+static void t_qos_priority_reliability(void)
+{
+    char a[64];
+    FACE_TSS_CONFIG pc, sc;
+    FACE_TSS *pub, *sub;
+    FACE_TSS_CONNECTION_ID_TYPE pid, sid;
+    FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn;
+    FACE_TSS_MESSAGE m;
+    FACE_TSS_QOS_EVENT qos;
+    FACE_TSS_STATS stats;
+    cb_state_t st;
+    int64_t val;
+    int n;
+    TEST_BEGIN("qos_priority_reliability");
+    addr(a);
+    mk_cfg(&pc, "QOSPRI", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_PUBLISHER);
+    mk_cfg(&sc, "QOSPRI", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_SUBSCRIBER);
+    pub = face_tss_create("pub");
+    sub = face_tss_create("sub");
+    CHECK_RC(face_tss_initialize(pub, &pc), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_initialize(sub, &sc), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(pub, "qospri", &pid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(sub, "QOSPRI", &sid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    msleep(400);
+
+    /* no policies: QoS event carries message_age_ns + priority, and no
+     * sequence_gap element (reliability monitoring inactive). */
+    txn = 1;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"plain", 5),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&m, 0, sizeof(m));
+    memset(&qos, 0, sizeof(qos));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      &qos),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(qos.count == 2);
+    CHECK(strcmp(qos.elements[0].keyname, "message_age_ns") == 0);
+    CHECK(strcmp(qos.elements[1].keyname, "priority") == 0);
+    CHECK(strcmp(qos.elements[1].value, "0") == 0);
+    face_tss_message_fini(&m);
+
+    /* priority stamping: the sender's PRIORITY policy value travels on
+     * the wire and is reported in the receiver's QoS event. */
+    CHECK_RC(face_tss_set_qos_policy(pub, pid, FACE_TSS_QOS_PRIORITY, 5),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 2;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"prio5", 5),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&m, 0, sizeof(m));
+    memset(&qos, 0, sizeof(qos));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      &qos),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(strcmp(qos.elements[1].value, "5") == 0);
+    face_tss_message_fini(&m);
+
+    /* priority threshold: below-threshold messages are dropped and the
+     * receive keeps waiting -> TIMED_OUT when nothing qualifying
+     * arrives. */
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_PRIORITY, 5),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_set_qos_policy(pub, pid, FACE_TSS_QOS_PRIORITY, 3),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 3;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"low", 3),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&m, 0, sizeof(m));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 1000000000LL, 0, &txn, &m,
+                                      NULL),
+             FACE_TSS_RC_TIMED_OUT);
+    CHECK_RC(face_tss_stats(sub, &stats), FACE_TSS_RC_NO_ERROR);
+    CHECK(stats.priority_dropped == 1);
+    /* an above-threshold message still delivers. */
+    CHECK_RC(face_tss_set_qos_policy(pub, pid, FACE_TSS_QOS_PRIORITY, 7),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 4;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"high", 4),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&m, 0, sizeof(m));
+    memset(&qos, 0, sizeof(qos));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      &qos),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(m.payload_len == 4 && memcmp(m.payload, "high", 4) == 0);
+    CHECK(strcmp(qos.elements[1].value, "7") == 0);
+    face_tss_message_fini(&m);
+
+    /* priority threshold in callback dispatch: dropped, not delivered. */
+    memset(&st, 0, sizeof(st));
+    cb_state_init(&st);
+    CHECK_RC(face_tss_register_callback(sub, sid, on_msg, &st),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_set_qos_policy(pub, pid, FACE_TSS_QOS_PRIORITY, 2),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 5;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"cb-low", 6),
+             FACE_TSS_RC_NO_ERROR);
+    msleep(400);
+    cb_state_lock(&st);
+    n = st.n;
+    cb_state_unlock(&st);
+    CHECK(n == 0);
+    CHECK_RC(face_tss_stats(sub, &stats), FACE_TSS_RC_NO_ERROR);
+    CHECK(stats.priority_dropped == 2);
+    CHECK_RC(face_tss_unregister_callback(sub, sid), FACE_TSS_RC_NO_ERROR);
+    cb_state_fini(&st);
+
+    /* reliability admission control. */
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_RELIABILITY,
+                                     99),
+             FACE_TSS_RC_INVALID_PARAM);
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_RELIABILITY,
+                                     FACE_TSS_QOS_RELIABLE),
+             FACE_TSS_RC_NOT_AVAILABLE);
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_RELIABILITY,
+                                     FACE_TSS_QOS_BEST_EFFORT),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_get_qos_policy(sub, sid, FACE_TSS_QOS_RELIABILITY,
+                                     &val),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(val == FACE_TSS_QOS_BEST_EFFORT);
+
+    /* reliability gap monitoring: clean run reports sequence_gap 0. */
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_PRIORITY, 0),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 6;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"g1", 2),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 7;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"g2", 2),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&m, 0, sizeof(m));
+    memset(&qos, 0, sizeof(qos));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      &qos),
+             FACE_TSS_RC_NO_ERROR);
+    face_tss_message_fini(&m);
+    memset(&m, 0, sizeof(m));
+    memset(&qos, 0, sizeof(qos));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      &qos),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(qos.count == 3);
+    CHECK(strcmp(qos.elements[2].keyname, "sequence_gap") == 0);
+    CHECK(strcmp(qos.elements[2].value, "0") == 0);
+    face_tss_message_fini(&m);
+    CHECK_RC(face_tss_stats(sub, &stats), FACE_TSS_RC_NO_ERROR);
+    CHECK(stats.reliability_gaps == 0);
+
+    /* policy-dropped messages are observed on the wire: a dropped
+     * message followed by a delivered one reports no phantom gap. */
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_PRIORITY, 5),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_set_qos_policy(pub, pid, FACE_TSS_QOS_PRIORITY, 2),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 8;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"drop", 4),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_set_qos_policy(pub, pid, FACE_TSS_QOS_PRIORITY, 7),
+             FACE_TSS_RC_NO_ERROR);
+    txn = 9;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"keep", 4),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&m, 0, sizeof(m));
+    memset(&qos, 0, sizeof(qos));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      &qos),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(m.payload_len == 4 && memcmp(m.payload, "keep", 4) == 0);
+    CHECK(strcmp(qos.elements[2].keyname, "sequence_gap") == 0);
+    CHECK(strcmp(qos.elements[2].value, "0") == 0);
+    face_tss_message_fini(&m);
+    CHECK_RC(face_tss_stats(sub, &stats), FACE_TSS_RC_NO_ERROR);
+    CHECK(stats.priority_dropped == 3);
+    CHECK(stats.reliability_gaps == 0);
+
+    face_tss_destroy(pub);
+    face_tss_destroy(sub);
+    face_tss_config_fini(&pc);
+    face_tss_config_fini(&sc);
+    TEST_END();
+}
+
 int main(void)
 {
     printf("[live]\n");
@@ -683,5 +891,6 @@ int main(void)
     t_receive_into();
     t_callback();
     t_qos_staleness();
+    t_qos_priority_reliability();
     return TEST_SUMMARY();
 }

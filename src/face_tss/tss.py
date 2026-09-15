@@ -72,6 +72,8 @@ from .types import (
     CONNECTION_ID_INVALID,
     MAX_CONNECTIONS,
     MESSAGE_GUID_INVALID,
+    QOS_BEST_EFFORT,
+    QOS_RELIABLE,
     TIMEOUT_INFINITE,
     TRANSACTION_ID_UNSPECIFIED,
     Direction,
@@ -120,6 +122,13 @@ class _Connection:
     send_seq: int = 0
     callback: MessageCallback | None = None
     callback_context: object = None
+    # Receive-side sequence baseline for QoS reliability gap monitoring.
+    # Only meaningful while a RELIABILITY policy is set; guarded by the
+    # TSS lock. A source change (or the first message) re-baselines
+    # without counting a gap.
+    rx_source: int = 0
+    rx_seq: int = 0
+    rx_seen: bool = False
 
 
 @dataclass
@@ -129,6 +138,9 @@ class TssStats:
     send_errors: int = 0
     receive_timeouts: int = 0
     stale_dropped: int = 0
+    priority_dropped: int = 0  # dropped by the QoS priority threshold
+    reliability_gaps: int = 0  # skipped sequence numbers observed while
+    # reliability monitoring was active
 
 
 class FaceTss:
@@ -175,6 +187,8 @@ class FaceTss:
                 send_errors=self._stats.send_errors,
                 receive_timeouts=self._stats.receive_timeouts,
                 stale_dropped=self._stats.stale_dropped,
+                priority_dropped=self._stats.priority_dropped,
+                reliability_gaps=self._stats.reliability_gaps,
             )
 
     # -- lifecycle: Initialize ------------------------------------------
@@ -351,19 +365,48 @@ class FaceTss:
     ) -> ReturnCode:
         """Set a per-connection QoS policy.
 
-        The staleness policy (QosPolicyKind.STALENESS / MAX_AGE, in
-        nanoseconds) is enforced: messages older than the threshold are
-        discarded on receive and the receive raises MessageStaleError
-        (callbacks are not invoked for stale messages). Other policy
-        kinds are stored, not enforced.
+        - ``QosPolicyKind.STALENESS`` / ``MAX_AGE`` (nanoseconds):
+          messages older than the threshold are discarded on receive and
+          the receive raises MessageStaleError (callbacks are not invoked
+          for stale messages).
+        - ``QosPolicyKind.PRIORITY``: the connection's send priority
+          (stamped on the wire) and, on a receiving connection, the
+          minimum-priority delivery threshold. Below-threshold messages
+          are dropped -- a blocking receive keeps waiting for a
+          qualifying message until the timeout, callbacks are not
+          invoked. 0 (or unset) accepts everything.
+        - ``QosPolicyKind.RELIABILITY``: ``QOS_BEST_EFFORT`` (0) or
+          ``QOS_RELIABLE`` (1). ``QOS_RELIABLE`` raises a
+          NOT_AVAILABLE FaceTssError on the best-effort transports
+          (pub/sub, bus), which cannot provide reliable delivery.
+          Setting either level enables receive-side sequence-gap
+          monitoring.
         """
         if value_ns < 0:
             raise InvalidParamError("QoS policy value must be >= 0")
         if kind == QosPolicyKind.MAX_AGE:
             kind = QosPolicyKind.STALENESS  # documented alias
+        if kind == QosPolicyKind.RELIABILITY and value_ns not in (
+            QOS_BEST_EFFORT,
+            QOS_RELIABLE,
+        ):
+            raise InvalidParamError(
+                f"unknown reliability level {value_ns} "
+                f"(expected {QOS_BEST_EFFORT} or {QOS_RELIABLE})"
+            )
         with self._lock:
             self._require_initialized()
-            self._require_open(connection_id)
+            conn = self._require_open(connection_id)
+            if (
+                kind == QosPolicyKind.RELIABILITY
+                and value_ns == QOS_RELIABLE
+                and conn.config.transport in ("pubsub", "bus")
+            ):
+                raise FaceTssError(
+                    ReturnCode.NOT_AVAILABLE,
+                    "QOS_RELIABLE is not available on the best-effort "
+                    f"{conn.config.transport} transport",
+                )
             self._qos_policies.setdefault(connection_id, {})[kind] = value_ns
             return ReturnCode.NO_ERROR
 
@@ -391,6 +434,21 @@ class FaceTss:
         age = now_ns() - timestamp_ns
         if age > threshold:
             self._stats.stale_dropped += 1
+            return True
+        return False
+
+    def _is_below_priority(
+        self, connection_id: ConnectionId, priority: int
+    ) -> bool:
+        """True if the connection's priority threshold rejects this message.
+
+        Call with the lock held. Records the drop in stats.
+        """
+        threshold = self._qos_policies.get(connection_id, {}).get(
+            QosPolicyKind.PRIORITY, 0
+        )
+        if threshold > 0 and priority < threshold:
+            self._stats.priority_dropped += 1
             return True
         return False
 
@@ -442,6 +500,13 @@ class FaceTss:
                 payload=data,
                 message_guid=int(message_guid),
                 instance_uid=instance_uid,
+                # QoS priority: stamp the connection's policy value
+                # (0 when unset).
+                priority=int(
+                    self._qos_policies.get(connection_id, {}).get(
+                        QosPolicyKind.PRIORITY, 0
+                    )
+                ),
             )
         # Blocking I/O with the TSS lock released: one slow send must not
         # stall unrelated connections or block finalize().
@@ -461,15 +526,117 @@ class FaceTss:
 
     # -- messaging: Receive_Message ---------------------------------------
     @staticmethod
-    def _qos_for(env: Envelope) -> QosEvent:
+    def _qos_for(env: Envelope, seq_gap: int = -1) -> QosEvent:
         """Honest, transport-observable QoS data for one received message.
 
-        Currently one element: message_age_ns (receive time minus the send
-        timestamp). Staleness enforcement happens in the receive paths
-        before this runs; see issue #2.
+        Elements: ``message_age_ns`` (receive time minus the send
+        timestamp), ``priority`` (the sender's priority from the
+        envelope), and -- when reliability monitoring is active for the
+        connection (``seq_gap >= 0``) -- ``sequence_gap`` (skipped
+        sequence numbers immediately before this message). Staleness and
+        priority enforcement happen in the receive paths before this
+        runs; see issue #2.
         """
         age = now_ns() - env.timestamp_ns
-        return QosEvent([QosElement(name="message_age_ns", value=max(age, 0))])
+        elements = [
+            QosElement(name="message_age_ns", value=max(age, 0)),
+            QosElement(name="priority", value=int(env.priority)),
+        ]
+        if seq_gap >= 0:
+            elements.append(QosElement(name="sequence_gap", value=seq_gap))
+        return QosEvent(elements)
+
+    def _rx_gap_locked(self, connection_id: ConnectionId, env: Envelope) -> int:
+        """Sequence-gap bookkeeping for QoS reliability monitoring.
+
+        Call with the lock held, once per wire-observed envelope (before
+        policy filtering, so stale/priority drops do not surface as
+        phantom gaps). Returns -1 when no RELIABILITY policy is set
+        (monitoring inactive); otherwise updates the per-connection
+        baseline and returns the
+        number of skipped sequence numbers immediately before this
+        message (0 when none). A new source (or the first message)
+        re-baselines without counting a gap: on pub/sub a late
+        subscriber legitimately misses the messages sent before it
+        arrived.
+        """
+        policies = self._qos_policies.get(connection_id, {})
+        if QosPolicyKind.RELIABILITY not in policies:
+            return -1
+        conn = self._connections.get(connection_id)
+        if conn is None:  # destroyed concurrently; nothing to track
+            return -1
+        gap = 0
+        if not conn.rx_seen or env.source_id != conn.rx_source:
+            pass  # (re)baseline: no gap counted
+        elif env.sequence_number > conn.rx_seq + 1:
+            gap = env.sequence_number - conn.rx_seq - 1
+            self._stats.reliability_gaps += gap
+        if (
+            not conn.rx_seen
+            or env.source_id != conn.rx_source
+            or env.sequence_number > conn.rx_seq
+        ):
+            conn.rx_source = env.source_id
+            conn.rx_seq = env.sequence_number
+            conn.rx_seen = True
+        return gap
+
+    def _receive_envelope(
+        self, connection_id: ConnectionId, timeout_ns: int
+    ) -> tuple[Envelope, int]:
+        """Blocking receive core with QoS priority filtering.
+
+        Below-threshold messages are dropped (counted in stats) and the
+        wait continues until the timeout expires; raises TimedOutError
+        when nothing qualifying arrives. A poll (timeout 0) tries once.
+
+        Returns ``(envelope, seq_gap)`` where ``seq_gap`` is the
+        reliability sequence gap observed immediately before the
+        delivered envelope (-1 when monitoring is inactive). Gap
+        bookkeeping observes every envelope that arrives on the wire,
+        before policy filtering, so stale/priority drops do not surface
+        as phantom gaps later.
+        """
+        with self._lock:
+            conn = self._require_open(connection_id)
+            if not conn.config.can_receive:
+                raise InvalidModeError(
+                    f"connection {conn.config.name} is SOURCE-only"
+                )
+            transport = conn.transport
+            prio_threshold = self._qos_policies.get(connection_id, {}).get(
+                QosPolicyKind.PRIORITY, 0
+            )
+        # Deadline-based so priority drops do not extend the caller's
+        # timeout. None = infinite; timeout 0 polls once.
+        deadline = now_ns() + timeout_ns if timeout_ns > 0 else None
+        seq_gap = -1
+        while True:
+            remaining = timeout_ns
+            if deadline is not None:
+                remaining = deadline - now_ns()
+                if remaining <= 0:
+                    with self._lock:
+                        self._stats.receive_timeouts += 1
+                    raise TimedOutError()
+            try:
+                env = transport.receive(remaining)
+            except TimedOutError:
+                with self._lock:
+                    self._stats.receive_timeouts += 1
+                raise
+            with self._lock:
+                seq_gap = self._rx_gap_locked(connection_id, env)
+            if prio_threshold > 0 and env.priority < prio_threshold:
+                with self._lock:
+                    self._stats.priority_dropped += 1
+                if timeout_ns == 0:
+                    with self._lock:
+                        self._stats.receive_timeouts += 1
+                    raise TimedOutError()
+                continue
+            return env, seq_gap
 
     def receive_message(
         self,
@@ -484,21 +651,7 @@ class FaceTss:
         send-only connections, DataBufferTooSmallError if the payload is
         smaller than ``min_message_size`` (FACE buffer-too-small semantics).
         """
-        with self._lock:
-            conn = self._require_open(connection_id)
-            if not conn.config.can_receive:
-                raise InvalidModeError(
-                    f"connection {conn.config.name} is SOURCE-only"
-                )
-            transport = conn.transport
-        # Blocking I/O with the TSS lock released: one thread's receive
-        # must not stall the rest of the instance.
-        try:
-            env = transport.receive(timeout_ns)
-        except TimedOutError:
-            with self._lock:
-                self._stats.receive_timeouts += 1
-            raise
+        env, seq_gap = self._receive_envelope(connection_id, timeout_ns)
         with self._lock:
             if len(env.payload) < min_message_size:
                 raise DataBufferTooSmallError(
@@ -518,7 +671,7 @@ class FaceTss:
                 ),
                 message_guid=env.message_guid,
             )
-            return msg, int(env.transaction_id), self._qos_for(env)
+            return msg, int(env.transaction_id), self._qos_for(env, seq_gap)
 
     def receive_into(
         self,
@@ -539,20 +692,7 @@ class FaceTss:
         the too-small case the message is discarded and the error message
         reports the required size.
         """
-        with self._lock:
-            conn = self._require_open(connection_id)
-            if not conn.config.can_receive:
-                raise InvalidModeError(
-                    f"connection {conn.config.name} is SOURCE-only"
-                )
-            transport = conn.transport
-        # Blocking I/O with the TSS lock released.
-        try:
-            env = transport.receive(timeout_ns)
-        except TimedOutError:
-            with self._lock:
-                self._stats.receive_timeouts += 1
-            raise
+        env, seq_gap = self._receive_envelope(connection_id, timeout_ns)
         with self._lock:
             if len(env.payload) < min_message_size:
                 raise DataBufferTooSmallError(
@@ -579,7 +719,7 @@ class FaceTss:
                 int(env.transaction_id),
                 header,
                 env.message_guid,
-                self._qos_for(env),
+                self._qos_for(env, seq_gap),
             )
 
     def try_receive(
@@ -626,14 +766,25 @@ class FaceTss:
                     source_uid=env.source_id,
                     timestamp=env.timestamp_ns,
                 )
+                seq_gap = -1
                 with self._lock:
                     live = self._connections.get(connection_id)
                     cb = live.callback if live is not None else None
                     ctx = live.callback_context if live is not None else None
-                    # Stale messages are dropped, not delivered; the drop
-                    # is recorded in stats (no return-code channel here).
+                    # Gap bookkeeping observes every envelope on the wire,
+                    # before policy filtering, so stale/priority drops do
+                    # not surface as phantom gaps later.
+                    if cb is not None:
+                        seq_gap = self._rx_gap_locked(connection_id, env)
+                    # Stale and below-priority messages are dropped, not
+                    # delivered; the drop is recorded in stats (no
+                    # return-code channel here).
                     if cb is not None and self._is_stale(
                         connection_id, env.timestamp_ns
+                    ):
+                        cb = None
+                    elif cb is not None and self._is_below_priority(
+                        connection_id, env.priority
                     ):
                         cb = None
                 if cb is not None:
@@ -644,7 +795,7 @@ class FaceTss:
                             int(env.message_guid),
                             env.payload,
                             header,
-                            self._qos_for(env),
+                            self._qos_for(env, seq_gap),
                             ctx,
                         )
                     except Exception:

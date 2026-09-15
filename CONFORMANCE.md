@@ -140,9 +140,13 @@ Xvfb, so File → Projects → Import could not be reached to load the
 - Renamed `BUFFER_TOO_SMALL` -> `DATA_BUFFER_TOO_SMALL` (standard name).
 - `HEADER_TYPE` projection: `instance_uid` / `source_uid` / `timestamp`.
 - `QoS_EVENT_TYPE` projection: fixed-capacity (8) list of QoS elements.
-  Each receive/callback reports one honest transport-observable element:
-  `message_age_ns` (receive time minus envelope send timestamp, clamped to
-  zero). No QoS policies are managed or enforced.
+  Each receive/callback reports honest transport-observable elements:
+  `message_age_ns` (receive time minus envelope send timestamp, clamped
+  to zero), `priority` (the sender's stamped priority, 0 when absent),
+  plus `sequence_gap` when reliability monitoring is enabled on the
+  connection. `STALENESS` and `PRIORITY` policies are enforced on the
+  receive path; `RELIABILITY` is honest admission control plus
+  sequence-gap observability, not reliable delivery.
 - `MESSAGE_GUID_TYPE` (uint64) with `MESSAGE_GUID_INVALID = 0`.
 
 ### Operation signatures (`tss.h` / `src/face_tss/tss.py`)
@@ -204,17 +208,34 @@ Xvfb, so File → Projects → Import could not be reached to load the
 - Python pub/sub across processes: 16/20 with new header fields.
 
 ## Partially implemented / known divergences
-- **QoS**: the event carries one honest element per message
-  (`message_age_ns`) on receive and callback paths. The staleness
-  policy is enforced: `face_tss_set_qos_policy` /
-  `face_tss_get_qos_policy` (C) and `set_qos_policy` / `get_qos_policy`
-  (Python) manage per-connection policies; messages older than the
-  connection's `STALENESS` threshold (ns) are discarded on receive and
-  the call returns `MESSAGE_STALE` / raises `MessageStaleError`, with
-  the drop counted in `stats.stale_dropped`. Stale messages are not
-  delivered to registered callbacks. `MAX_AGE` is a documented alias
-  for `STALENESS`. Other policy kinds (priority, reliability) are
-  stored, not enforced; there is no cross-connection QoS negotiation.
+- **QoS**: the event carries honest elements per message
+  (`message_age_ns`, `priority`, and `sequence_gap` when reliability
+  monitoring is active) on receive and callback paths. Two policies are
+  enforced via `face_tss_set_qos_policy` / `face_tss_get_qos_policy` (C)
+  and `set_qos_policy` / `get_qos_policy` (Python):
+  - `STALENESS` (alias `MAX_AGE`): messages older than the connection's
+    threshold (ns) are discarded on receive and the call returns
+    `MESSAGE_STALE` / raises `MessageStaleError`, with the drop counted
+    in `stats.stale_dropped`. Stale messages are not delivered to
+    registered callbacks.
+  - `PRIORITY`: the sender's value is stamped into the wire envelope
+    (backward-compatible field 8; absent decodes as 0) and reported in
+    the receiver's QoS event. A receiving connection's value acts as a
+    minimum delivery threshold: below-threshold messages are dropped
+    (blocking receive keeps waiting for a qualifying message;
+    callbacks silently skip them), counted in
+    `stats.priority_dropped`.
+  - `RELIABILITY` accepts only `BEST_EFFORT` (0); `RELIABLE` (1) is
+    rejected with `NOT_AVAILABLE` on the best-effort nng transports
+    (pub/sub, bus) rather than being silently pretended. Setting either
+    level enables per-connection sequence-gap monitoring: the first
+    message (or a source change) re-baselines without counting a gap,
+    and skipped sequence numbers are reported as `sequence_gap` in the
+    QoS event and counted in `stats.reliability_gaps`.
+  These policy names and semantics are this implementation's own
+  extension — the FACE IDL defines QoS only as string key/value
+  elements with no normative policy names. There is no cross-connection
+  QoS negotiation, and nng delivery remains best-effort.
 - **Receive buffers**: caller-owned receive is `face_tss_receive_message_into`
   (C) / `receive_into` (Python) with full `DATA_BUFFER_TOO_SMALL` + required
   size semantics. The allocating `receive_message` remains as a documented

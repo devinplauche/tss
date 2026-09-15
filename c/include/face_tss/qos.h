@@ -16,13 +16,26 @@
 extern "C" {
 #endif
 
-/* QoS policy kinds. */
+/* QoS policy kinds (implementation extensions; the FACE 3.2 IDL defines
+ * QoS only as key/value string pairs with no normative policy kinds). */
 typedef enum FACE_TSS_QOS_POLICY_KIND {
     FACE_TSS_QOS_STALENESS = 0,      /* max message age before MESSAGE_STALE */
     FACE_TSS_QOS_MAX_AGE = 1,        /* alias for staleness threshold */
-    FACE_TSS_QOS_PRIORITY = 2,       /* message priority hint */
-    FACE_TSS_QOS_RELIABILITY = 3    /* reliability level */
+    FACE_TSS_QOS_PRIORITY = 2,       /* message priority: senders stamp it
+                                      * on the wire; receivers use it as a
+                                      * minimum-priority delivery threshold */
+    FACE_TSS_QOS_RELIABILITY = 3     /* reliability level, see the
+                                      * FACE_TSS_QOS_BEST_EFFORT /
+                                      * FACE_TSS_QOS_RELIABLE values below */
 } FACE_TSS_QOS_POLICY_KIND;
+
+/* Reliability levels for FACE_TSS_QOS_RELIABILITY. Both nng transports
+ * (pub/sub, bus) are best-effort: BEST_EFFORT is always accepted, while
+ * RELIABLE is rejected with NOT_AVAILABLE because the transport cannot
+ * provide reliable delivery. Setting either level opts the connection
+ * into sequence-gap monitoring on receive (see FACE_TSS_STATS). */
+#define FACE_TSS_QOS_BEST_EFFORT 0
+#define FACE_TSS_QOS_RELIABLE 1
 
 /* Opaque QoS policy manager. */
 typedef struct FACE_TSS_QOS FACE_TSS_QOS;

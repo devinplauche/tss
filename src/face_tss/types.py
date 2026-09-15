@@ -126,8 +126,16 @@ class QosPolicyKind(enum.IntEnum):
 
     STALENESS = 0  #: max message age (ns) before MESSAGE_STALE
     MAX_AGE = 1  #: alias for STALENESS
-    PRIORITY = 2  #: message priority hint (stored, not enforced)
-    RELIABILITY = 3  #: reliability level (stored, not enforced)
+    PRIORITY = 2  #: send priority (stamped on the wire); on a receiving
+    #: connection, the minimum-priority delivery threshold
+    RELIABILITY = 3  #: reliability level: QOS_BEST_EFFORT or QOS_RELIABLE
+
+
+#: Reliability level: best-effort delivery (always available).
+QOS_BEST_EFFORT = 0
+#: Reliability level: reliable delivery (rejected with NOT_AVAILABLE on
+#: the best-effort nng transports, pub/sub and bus).
+QOS_RELIABLE = 1
 
 
 def now_ns() -> int:

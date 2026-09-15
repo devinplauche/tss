@@ -66,6 +66,9 @@ typedef struct FACE_TSS_STATS {
     uint64_t send_errors;
     uint64_t receive_timeouts;
     uint64_t stale_dropped;
+    uint64_t priority_dropped;  /* dropped by the QoS priority threshold */
+    uint64_t reliability_gaps;  /* skipped sequence numbers observed while
+                                 * reliability monitoring was active */
 } FACE_TSS_STATS;
 
 /* Received message: opaque payload bytes plus the standard FACE header.
@@ -190,10 +193,20 @@ FACE_TSS_UID_TYPE face_tss_source_id(FACE_TSS *tss);
 const char *face_tss_rc_str(FACE_TSS_RETURN_CODE rc);
 
 /* QoS policies (extensions; not in the FACE IDL). Set a per-connection
- * QoS policy (e.g. FACE_TSS_QOS_STALENESS threshold in nanoseconds);
- * stale messages are discarded on receive and the call returns
- * MESSAGE_STALE. Get returns NO_ACTION when no policy of that kind
- * is set. */
+ * QoS policy:
+ * - FACE_TSS_QOS_STALENESS (nanoseconds): messages older than the
+ *   threshold are discarded on receive and the call returns
+ *   MESSAGE_STALE.
+ * - FACE_TSS_QOS_PRIORITY: the connection's send priority (stamped on
+ *   the wire) and, on a receiving connection, the minimum-priority
+ *   delivery threshold. Below-threshold messages are dropped
+ *   (receive keeps waiting for a qualifying message until the timeout;
+ *   callbacks are not invoked). 0 (or unset) accepts everything.
+ * - FACE_TSS_QOS_RELIABILITY: FACE_TSS_QOS_BEST_EFFORT (0) or
+ *   FACE_TSS_QOS_RELIABLE (1). RELIABLE is rejected with NOT_AVAILABLE
+ *   on the best-effort nng transports (pub/sub, bus). Setting either
+ *   level enables receive-side sequence-gap monitoring.
+ * Get returns NO_ACTION when no policy of that kind is set. */
 FACE_TSS_RETURN_CODE face_tss_set_qos_policy(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
     FACE_TSS_QOS_POLICY_KIND kind, int64_t value_ns);

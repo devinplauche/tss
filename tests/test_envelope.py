@@ -54,3 +54,21 @@ def test_accepts_bytearray_and_memoryview():
     raw = encode_envelope(_env())
     assert decode_envelope(bytearray(raw)).payload == _env().payload
     assert decode_envelope(memoryview(raw)).payload == _env().payload
+
+
+def test_round_trip_priority():
+    """Priority round-trips on the wire (field 8, signed 64-bit)."""
+    env = _env(priority=7)
+    back = decode_envelope(encode_envelope(env))
+    assert back == env
+    assert back.priority == 7
+    env = _env(priority=-1)
+    back = decode_envelope(encode_envelope(env))
+    assert back.priority == -1
+
+
+def test_absent_priority_decodes_as_zero():
+    """Envelopes encoded without field 8 decode priority as 0."""
+    env = _env()
+    assert env.priority == 0
+    assert decode_envelope(encode_envelope(env)).priority == 0

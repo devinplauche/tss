@@ -10,9 +10,12 @@ Wire schema (see ``c/schemas/tss_envelope.fbs``), field slots are fixed:
     slot 5  payload         : [ubyte]  (opaque typed message bytes)
     slot 6  message_guid    : ulong    (application type identity)
     slot 7  instance_uid    : ulong    (unique per send, per TSS instance)
+    slot 8  priority        : long     (sender priority, 0 = default/lowest;
+                                       absent on the wire decodes as 0)
 
 Slots 6-7 carry the FACE 3.1 header identity fields; slots 0-5 preserve the
-original layout. The typed payload is produced/consumed by generated
+original layout. Slot 8 carries the sender's FACE_TSS_QOS_PRIORITY policy
+value for QoS priority enforcement on the receive path. The typed payload is produced/consumed by generated
 FlatBuffers code for the application's own schema; the TSS never
 interprets it, it only frames it. ``encode``/``decode`` use the
 ``flatbuffers`` runtime directly (Builder for writing, Table for reading)
@@ -40,6 +43,7 @@ ENVELOPE_SLOTS = {
     "payload": 5,
     "message_guid": 6,
     "instance_uid": 7,
+    "priority": 8,
 }
 
 
@@ -57,19 +61,21 @@ class Envelope:
     payload: bytes
     message_guid: int = 0
     instance_uid: int = 0
+    priority: int = 0
 
 
 def encode_envelope(env: Envelope) -> bytes:
     """Serialize an envelope to FlatBuffers bytes ready for nng send.
 
     NOTE: the Builder's ``*Slot`` writers take the plain field index
-    (0..7); only the Table *readers* use vtable offsets (4 + 2*slot).
+    (0..8); only the Table *readers* use vtable offsets (4 + 2*slot).
     """
     builder = flatbuffers.Builder(256)
     name_off = builder.CreateString(env.connection_name)
     payload_off = builder.CreateByteVector(bytes(env.payload))
-    builder.StartObject(8)
+    builder.StartObject(9)
     # Prepend in reverse field order (highest slot first).
+    builder.PrependInt64Slot(8, int(env.priority), 0)
     builder.PrependUint64Slot(7, int(env.instance_uid), 0)
     builder.PrependUint64Slot(6, int(env.message_guid), 0)
     builder.PrependUOffsetTRelativeSlot(5, payload_off, 0)
@@ -114,6 +120,7 @@ def decode_envelope(buf: bytes | bytearray | memoryview) -> Envelope:
 
     message_guid = int(tab.GetSlot(_voff(6), 0, N.Uint64Flags))
     instance_uid = int(tab.GetSlot(_voff(7), 0, N.Uint64Flags))
+    priority = int(tab.GetSlot(_voff(8), 0, N.Int64Flags))
 
     return Envelope(
         connection_name=connection_name,
@@ -124,4 +131,5 @@ def decode_envelope(buf: bytes | bytearray | memoryview) -> Envelope:
         payload=payload,
         message_guid=message_guid,
         instance_uid=instance_uid,
+        priority=priority,
     )

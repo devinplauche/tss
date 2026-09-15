@@ -4,7 +4,8 @@
  * / create_vector / end_table / finalize_buffer) so no generated code is
  * needed. Decoding uses the raw FlatBuffers object layout with endian-safe
  * memcpy reads plus `flatcc_verify_table_as_root` against a hand-written
- * table verifier that only accepts the eight known fields with their exact
+ * table verifier that only accepts the nine known fields with their exact
+ * scalar widths.
  * scalar widths.
  */
 
@@ -34,6 +35,7 @@
 #define F_PAYLOAD 5
 #define F_GUID 6
 #define F_IUID 7
+#define F_PRIO 8
 
 void face_tss_envelope_init(FACE_TSS_ENVELOPE *env)
 {
@@ -159,6 +161,12 @@ FACE_TSS_RETURN_CODE face_tss_envelope_encode(
             goto oom_table;
         flatbuffers_int64_write_to_pe(pi64, (int64_t)env->instance_uid);
     }
+    if (env->priority != 0) {
+        pi64 = (int64_t *)flatcc_builder_table_add(B, F_PRIO, 8, 8);
+        if (!pi64)
+            goto oom_table;
+        flatbuffers_int64_write_to_pe(pi64, (int64_t)env->priority);
+    }
 
     root = flatcc_builder_end_table(B);
     if (!root)
@@ -254,13 +262,13 @@ static uint64_t rd_u64(const uint8_t *p)
 }
 
 /* Vtable entry for field id, or 0 when absent. All bounds pre-checked:
- * the caller guarantees vsize covers ids 0..7 (checked once in decode). */
+ * the caller guarantees vsize covers ids 0..8 (checked once in decode). */
 static uint16_t vt_entry(const uint8_t *buf, uint32_t vtable,
                          uint32_t vsize, int id)
 {
     uint32_t at;
     uint16_t e;
-    if (id < 0 || id > 7)
+    if (id < 0 || id > 8)
         return 0;
     if (vsize < (uint32_t)(4 + 2 * id + 2))
         return 0;
@@ -370,6 +378,7 @@ FACE_TSS_RETURN_CODE face_tss_envelope_decode(
                    (FACE_TSS_MESSAGE_GUID_TYPE)rd_s64(buf + _at));
     TRY_SCALAR(F_IUID, tmp.instance_uid =
                    (FACE_TSS_UID_TYPE)rd_s64(buf + _at));
+    TRY_SCALAR(F_PRIO, tmp.priority = (int64_t)rd_s64(buf + _at));
 #undef TRY_SCALAR
 
     /* field 5: payload vector (absent -> empty). */

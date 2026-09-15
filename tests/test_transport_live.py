@@ -62,8 +62,10 @@ def test_pubsub_send_receive_round_trip(tcp_addr):
         assert msg.header.source_uid == pub.source_id
         assert msg.header.instance_uid != 0
         assert msg.header.timestamp > 0
-        assert len(qos) == 1
+        assert len(qos) == 2
         assert qos[0].name == "message_age_ns"
+        assert qos[1].name == "priority"
+        assert qos[1].value == 0
 
         # Unspecified transaction id: the TSS assigns one (inout semantics).
         used2 = pub.send_message(pub_id, b"second", 5_000_000_000)
@@ -219,8 +221,10 @@ def test_callback_delivery(tcp_addr):
         assert payload == b"via-callback"
         assert header.source_uid == pub.source_id
         assert header.instance_uid != 0
-        assert len(qos) == 1
+        assert len(qos) == 2
         assert qos[0].name == "message_age_ns"
+        assert qos[1].name == "priority"
+        assert qos[1].value == 0
         assert ctx == "ctx"
         assert sub.unregister_callback(sub_id) == ReturnCode.NO_ERROR
     finally:
@@ -249,8 +253,10 @@ def test_receive_into_caller_owned_buffer(tcp_addr):
         assert txn == 22
         assert header.source_uid == pub.source_id
         assert header.timestamp > 0
-        assert len(qos) == 1
+        assert len(qos) == 2
         assert qos[0].name == "message_age_ns"
+        assert qos[1].name == "priority"
+        assert qos[1].value == 0
 
         # Zero-length payload: empty buffer works.
         pub.send_message(pub_id, b"", 5_000_000_000, transaction_id=23)
@@ -348,8 +354,10 @@ def test_pubsub_inproc_round_trip():
         assert msg.header.source_uid == pub.source_id
         assert msg.header.instance_uid != 0
         assert msg.header.timestamp > 0
-        assert len(qos) == 1
+        assert len(qos) == 2
         assert qos[0].name == "message_age_ns"
+        assert qos[1].name == "priority"
+        assert qos[1].value == 0
     finally:
         pub.finalize()
         sub.finalize()
@@ -402,7 +410,7 @@ def test_qos_staleness_enforcement(tcp_addr):
                                             timeout_ns=5_000_000_000)
         assert msg.payload == b"new"
         assert txn == 2
-        assert len(qos) == 1
+        assert len(qos) == 2
     finally:
         pub.finalize()
         sub.finalize()
@@ -434,6 +442,253 @@ def test_qos_staleness_callback_drop(tcp_addr):
         while not delivered and time.time() < deadline:
             time.sleep(0.05)
         assert delivered == [b"fresh"]
+    finally:
+        pub.finalize()
+        sub.finalize()
+
+
+def test_qos_priority_threshold(tcp_addr):
+    """QoS priority: stamped on send, threshold-filtered on receive.
+
+    The sender's PRIORITY policy value travels on the wire (field 8) and
+    is reported in the receiver's QoS event. A receiving connection with
+    a PRIORITY threshold drops below-threshold messages; a blocking
+    receive keeps waiting for a qualifying message and raises
+    TimedOutError when the timeout expires.
+    """
+    from face_tss import QosPolicyKind
+
+    pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
+    try:
+        # Priority stamping: reported in the receiver's QoS event.
+        pub.set_qos_policy(pub_id, QosPolicyKind.PRIORITY, 5)
+        pub.send_message(pub_id, b"p5", 5_000_000_000, transaction_id=1)
+        msg, txn, qos = sub.receive_message(
+            sub_id, timeout_ns=5_000_000_000
+        )
+        assert msg.payload == b"p5"
+        assert qos[1].name == "priority"
+        assert qos[1].value == 5
+
+        # Threshold: below-threshold message is dropped; the receive
+        # waits for a qualifying message instead of returning it.
+        sub.set_qos_policy(sub_id, QosPolicyKind.PRIORITY, 5)
+        pub.set_qos_policy(pub_id, QosPolicyKind.PRIORITY, 3)
+        pub.send_message(pub_id, b"low", 5_000_000_000, transaction_id=2)
+        with pytest.raises(TimedOutError):
+            sub.receive_message(sub_id, timeout_ns=1_000_000_000)
+        assert sub.stats.priority_dropped == 1
+
+        # Above-threshold message still delivers with its priority.
+        pub.set_qos_policy(pub_id, QosPolicyKind.PRIORITY, 7)
+        pub.send_message(pub_id, b"high", 5_000_000_000, transaction_id=3)
+        msg, txn, qos = sub.receive_message(
+            sub_id, timeout_ns=5_000_000_000
+        )
+        assert msg.payload == b"high"
+        assert qos[1].value == 7
+    finally:
+        pub.finalize()
+        sub.finalize()
+
+
+def test_qos_priority_callback_drop(tcp_addr):
+    """QoS priority threshold in callback dispatch: dropped, not delivered."""
+    from face_tss import QosPolicyKind
+
+    pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
+    delivered = []
+    try:
+        sub.set_qos_policy(sub_id, QosPolicyKind.PRIORITY, 5)
+        pub.set_qos_policy(pub_id, QosPolicyKind.PRIORITY, 2)
+        sub.register_callback(
+            sub_id,
+            lambda cid, txn, guid, payload, header, qos, ctx:
+                delivered.append(payload),
+        )
+        pub.send_message(pub_id, b"cb-low", 5_000_000_000, transaction_id=1)
+        time.sleep(0.5)  # let the background dispatch run
+        assert delivered == []
+        assert sub.stats.priority_dropped == 1
+        # Above threshold reaches the callback.
+        pub.set_qos_policy(pub_id, QosPolicyKind.PRIORITY, 9)
+        pub.send_message(pub_id, b"cb-high", 5_000_000_000, transaction_id=2)
+        deadline = time.time() + 5
+        while not delivered and time.time() < deadline:
+            time.sleep(0.05)
+        assert delivered == [b"cb-high"]
+    finally:
+        pub.finalize()
+        sub.finalize()
+
+
+def test_qos_reliability_admission(tcp_addr):
+    """QoS reliability: level validation and transport admission control.
+
+    Only the two documented levels exist; RELIABLE is rejected with
+    NOT_AVAILABLE on the best-effort nng transports (pub/sub, bus)
+    instead of being silently pretended.
+    """
+    from face_tss import (
+        FaceTssError,
+        InvalidParamError,
+        QOS_BEST_EFFORT,
+        QOS_RELIABLE,
+        QosPolicyKind,
+    )
+
+    pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
+    try:
+        with pytest.raises(InvalidParamError):
+            sub.set_qos_policy(sub_id, QosPolicyKind.RELIABILITY, 99)
+        with pytest.raises(FaceTssError) as exc_info:
+            sub.set_qos_policy(
+                sub_id, QosPolicyKind.RELIABILITY, QOS_RELIABLE
+            )
+        assert exc_info.value.return_code == ReturnCode.NOT_AVAILABLE
+        assert sub.set_qos_policy(
+            sub_id, QosPolicyKind.RELIABILITY, QOS_BEST_EFFORT
+        ) == ReturnCode.NO_ERROR
+        assert sub.get_qos_policy(
+            sub_id, QosPolicyKind.RELIABILITY
+        ) == QOS_BEST_EFFORT
+    finally:
+        pub.finalize()
+        sub.finalize()
+
+
+def test_qos_reliability_gap_detection(tcp_addr):
+    """QoS reliability monitoring: sequence gaps observed on receive.
+
+    Setting a RELIABILITY policy (either level) enables per-connection
+    sequence tracking. A raw publisher injects envelopes that skip a
+    sequence number; the gap is reported in the QoS event and counted in
+    stats. The first message from a source re-baselines without counting
+    a gap (a late subscriber legitimately misses earlier messages).
+    """
+    import pynng
+
+    from face_tss import QOS_BEST_EFFORT, QosPolicyKind
+    from face_tss.envelope import Envelope, encode_envelope
+
+    addr = tcp_addr()
+    sub = FaceTss("sub")
+    sub_cfg = (
+        TssConfigBuilder()
+        .add("GAP", direction=Direction.BI_DIRECTIONAL,
+             transport="pubsub", role="subscriber", address=addr)
+        .build()
+    )
+    sub.initialize(sub_cfg)
+    sub_id, _ = sub.create_connection("GAP")
+    # Raw publisher on the address the TSS subscriber dials.
+    raw_pub = pynng.Pub0(listen=addr)
+    time.sleep(0.4)  # dial + subscription settle
+    try:
+        # Monitoring inactive: no sequence_gap element.
+        topic = b"GAP\x00"
+        now = time.time_ns()
+
+        def raw_send(seq, payload):
+            env = Envelope(
+                connection_name="GAP",
+                transaction_id=seq,
+                source_id=4242,
+                sequence_number=seq,
+                timestamp_ns=now,
+                payload=payload,
+            )
+            raw_pub.send(topic + encode_envelope(env))
+
+        raw_send(1, b"one")
+        # The subscriber's dial/subscription may still be settling (inherent
+        # pub/sub early loss); retry until the first message gets through,
+        # then drain any duplicate retries before enabling monitoring.
+        deadline = time.time() + 10
+        msg = None
+        while msg is None and time.time() < deadline:
+            raw_send(1, b"one")
+            try:
+                msg, txn, qos = sub.receive_message(
+                    sub_id, timeout_ns=500_000_000
+                )
+            except TimedOutError:
+                continue
+        assert msg is not None and msg.payload == b"one"
+        assert len(qos) == 2  # message_age_ns + priority only
+        while True:
+            try:
+                dup, _, _ = sub.receive_message(
+                    sub_id, timeout_ns=200_000_000
+                )
+                assert dup.payload == b"one"  # only retries in flight
+            except TimedOutError:
+                break
+
+        # Monitoring active: first monitored message re-baselines
+        # (the pre-monitoring message can't establish a baseline).
+        sub.set_qos_policy(
+            sub_id, QosPolicyKind.RELIABILITY, QOS_BEST_EFFORT
+        )
+        raw_send(2, b"two")
+        msg, txn, qos = sub.receive_message(
+            sub_id, timeout_ns=5_000_000_000
+        )
+        assert msg.payload == b"two"
+        assert len(qos) == 3
+        assert qos[2].name == "sequence_gap"
+        assert qos[2].value == 0
+        assert sub.stats.reliability_gaps == 0
+
+        # A skipped sequence number is reported as a gap.
+        raw_send(4, b"four")  # sequence 3 skipped
+        msg, txn, qos = sub.receive_message(
+            sub_id, timeout_ns=5_000_000_000
+        )
+        assert msg.payload == b"four"
+        assert qos[2].name == "sequence_gap"
+        assert qos[2].value == 1
+        assert sub.stats.reliability_gaps == 1
+
+        # Clean run after the gap: sequence_gap 0, no new gaps counted.
+        raw_send(5, b"five")
+        msg, txn, qos = sub.receive_message(
+            sub_id, timeout_ns=5_000_000_000
+        )
+        assert qos[2].value == 0
+        assert sub.stats.reliability_gaps == 1
+    finally:
+        raw_pub.close()
+        sub.finalize()
+
+
+def test_qos_reliability_no_phantom_gap_from_policy_drops(tcp_addr):
+    """Policy-dropped messages are observed on the wire.
+
+    A below-threshold (dropped) message followed by a delivered one must
+    not report a phantom sequence gap: the drop was a receiver policy
+    choice, not transport loss.
+    """
+    from face_tss import QOS_BEST_EFFORT, QosPolicyKind
+
+    pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
+    try:
+        sub.set_qos_policy(
+            sub_id, QosPolicyKind.RELIABILITY, QOS_BEST_EFFORT
+        )
+        sub.set_qos_policy(sub_id, QosPolicyKind.PRIORITY, 5)
+        pub.set_qos_policy(pub_id, QosPolicyKind.PRIORITY, 3)
+        pub.send_message(pub_id, b"dropped", 5_000_000_000, transaction_id=1)
+        pub.set_qos_policy(pub_id, QosPolicyKind.PRIORITY, 7)
+        pub.send_message(pub_id, b"kept", 5_000_000_000, transaction_id=2)
+        msg, txn, qos = sub.receive_message(
+            sub_id, timeout_ns=5_000_000_000
+        )
+        assert msg.payload == b"kept"
+        assert qos[2].name == "sequence_gap"
+        assert qos[2].value == 0
+        assert sub.stats.priority_dropped == 1
+        assert sub.stats.reliability_gaps == 0
     finally:
         pub.finalize()
         sub.finalize()

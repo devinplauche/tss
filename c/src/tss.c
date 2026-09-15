@@ -30,6 +30,13 @@ typedef struct FACE_TSS_CONN {
      * down with no locks held (teardown_conn). */
     int refcount;
     uint64_t send_seq;
+    /* Receive-side sequence baseline for QoS reliability gap monitoring.
+     * Guarded by the TSS lock; only meaningful while a RELIABILITY policy
+     * is set on this connection. A source change (or the first message)
+     * re-baselines without counting a gap. */
+    FACE_TSS_UID_TYPE rx_source;
+    uint64_t rx_seq;
+    int rx_seen;
     FACE_TSS_MESSAGE_CB cb;
     void *cb_user;
     void (*cb_user_fini)(void *); /* cleanup for cb_user, may be NULL */
@@ -717,6 +724,7 @@ FACE_TSS_RETURN_CODE face_tss_set_qos_policy(
     FACE_TSS_QOS_POLICY_KIND kind, int64_t value_ns)
 {
     FACE_TSS_RETURN_CODE rc;
+    FACE_TSS_CONN *c;
     if (!tss)
         return FACE_TSS_RC_INVALID_PARAM;
     if (kind == FACE_TSS_QOS_MAX_AGE)
@@ -730,9 +738,28 @@ FACE_TSS_RETURN_CODE face_tss_set_qos_policy(
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
     }
-    if (!find_open(tss, connection_id)) {
+    c = find_open(tss, connection_id);
+    if (!c) {
         lock_drop(tss);
         return FACE_TSS_RC_CONNECTION_CLOSED;
+    }
+    if (kind == FACE_TSS_QOS_RELIABILITY) {
+        /* Only the two documented levels exist. */
+        if (value_ns != FACE_TSS_QOS_BEST_EFFORT &&
+            value_ns != FACE_TSS_QOS_RELIABLE) {
+            lock_drop(tss);
+            return FACE_TSS_RC_INVALID_PARAM;
+        }
+        /* Neither nng transport offers reliable delivery (both are
+         * best-effort), so RELIABLE is rejected loudly instead of being
+         * silently pretended. Setting either level opts the connection
+         * into receive-side sequence-gap monitoring. */
+        if (value_ns == FACE_TSS_QOS_RELIABLE &&
+            (c->cfg.transport == FACE_TSS_TRANSPORT_PUBSUB ||
+             c->cfg.transport == FACE_TSS_TRANSPORT_BUS)) {
+            lock_drop(tss);
+            return FACE_TSS_RC_NOT_AVAILABLE;
+        }
     }
     rc = face_tss_qos_set_policy(tss->qos, connection_id, kind, value_ns);
     lock_drop(tss);
@@ -796,6 +823,7 @@ FACE_TSS_RETURN_CODE face_tss_priv_send_guid(
     FACE_TSS_ENVELOPE env;
     FACE_TSS_UID_TYPE source_id, instance_uid;
     uint64_t seq;
+    int64_t prio = 0; /* QoS priority stamped on the envelope */
     FACE_TSS_RETURN_CODE rc;
     int teardown;
     if (!tss || !transaction_id)
@@ -834,6 +862,15 @@ FACE_TSS_RETURN_CODE face_tss_priv_send_guid(
      * alive across the unlocked window via the reference. */
     cfg = c->cfg;
     tr = c->transport;
+    {
+        /* QoS priority: stamp the connection's priority policy value on
+         * every outgoing message (0 when unset). */
+        int64_t pv = 0;
+        if (face_tss_qos_get_policy(tss->qos, connection_id,
+                                    FACE_TSS_QOS_PRIORITY, &pv) ==
+            FACE_TSS_RC_NO_ERROR)
+            prio = pv;
+    }
     conn_ref(c);
     lock_drop(tss);
 
@@ -846,6 +883,7 @@ FACE_TSS_RETURN_CODE face_tss_priv_send_guid(
     env.timestamp_ns = now_ns();
     env.instance_uid = instance_uid;
     env.message_guid = message_guid;
+    env.priority = prio;
     /* borrow caller bytes: encode copies into the builder, no copy here */
     env.payload = (uint8_t *)payload;
     env.payload_len = payload_len;
@@ -908,26 +946,82 @@ static void envelope_to_message(const FACE_TSS_ENVELOPE *env, FACE_TSS_MESSAGE *
     }
 }
 
-/* Populate the QoS event with honest, transport-observable data.
- * Currently one element: message_age_ns (receive time minus the send
- * timestamp in the header). Staleness enforcement happens upstream in
- * receive_envelope / cb_dispatch, so by the time this runs the message
- * is known-fresh (or no staleness policy is set); see issue #2. */
-static void qos_fill(FACE_TSS_QOS_EVENT *qos, int64_t timestamp_ns)
+/* Populate the QoS event with honest, transport-observable data:
+ * message_age_ns (receive time minus the send timestamp), the sender's
+ * priority from the envelope, and -- when reliability monitoring is
+ * active for the connection (seq_gap >= 0) -- the sequence gap observed
+ * immediately before this message. Staleness/priority enforcement
+ * happens upstream in receive_envelope / cb_dispatch, so by the time
+ * this runs the message is known-fresh and above-threshold (or no
+ * respective policy is set); see issues #2. */
+static void qos_fill(FACE_TSS_QOS_EVENT *qos, const FACE_TSS_ENVELOPE *env,
+                     int64_t seq_gap)
 {
     int64_t age;
-    if (!qos)
+    if (!qos || !env)
         return;
     face_tss_qos_event_init(qos);
-    age = now_ns() - timestamp_ns;
+    age = now_ns() - (int64_t)env->timestamp_ns;
     if (age < 0)
         age = 0;
-    qos->count = 1;
+    qos->count = 0;
     strncpy(qos->elements[0].keyname, "message_age_ns",
             sizeof(qos->elements[0].keyname) - 1);
     qos->elements[0].keyname[sizeof(qos->elements[0].keyname) - 1] = '\0';
     snprintf(qos->elements[0].value, sizeof(qos->elements[0].value),
              "%lld", (long long)age);
+    qos->count = 1;
+    strncpy(qos->elements[1].keyname, "priority",
+            sizeof(qos->elements[1].keyname) - 1);
+    qos->elements[1].keyname[sizeof(qos->elements[1].keyname) - 1] = '\0';
+    snprintf(qos->elements[1].value, sizeof(qos->elements[1].value),
+             "%lld", (long long)env->priority);
+    qos->count = 2;
+    if (seq_gap >= 0 && qos->count < FACE_TSS_MAX_QOS_ELEMENTS) {
+        strncpy(qos->elements[qos->count].keyname, "sequence_gap",
+                sizeof(qos->elements[qos->count].keyname) - 1);
+        qos->elements[qos->count].keyname
+            [sizeof(qos->elements[qos->count].keyname) - 1] = '\0';
+        snprintf(qos->elements[qos->count].value,
+                 sizeof(qos->elements[qos->count].value),
+                 "%lld", (long long)seq_gap);
+        qos->count++;
+    }
+}
+
+/* Sequence-gap bookkeeping for QoS reliability monitoring. Call with the
+ * TSS lock held, once per wire-observed envelope (before policy
+ * filtering, so stale/priority drops do not surface as phantom gaps).
+ * Returns -1 when no RELIABILITY policy is set on the connection
+ * (monitoring inactive); otherwise updates the per-connection baseline
+ * and returns the number of skipped sequence numbers immediately before
+ * this message (0 when none). A new source (or the first message)
+ * re-baselines without counting a gap: on pub/sub a late subscriber
+ * legitimately misses the messages sent before it arrived. */
+static int64_t rx_gap_locked(FACE_TSS *tss, FACE_TSS_CONN *c,
+                             FACE_TSS_CONNECTION_ID_TYPE connection_id,
+                             const FACE_TSS_ENVELOPE *env)
+{
+    int64_t level;
+    int64_t gap = 0;
+    if (face_tss_qos_get_policy(tss->qos, connection_id,
+                                FACE_TSS_QOS_RELIABILITY, &level) !=
+        FACE_TSS_RC_NO_ERROR)
+        return -1;
+    (void)level; /* BEST_EFFORT and RELIABLE both enable monitoring */
+    if (!c->rx_seen || env->source_id != c->rx_source) {
+        /* (Re)baseline: no gap counted. */
+    } else if (env->sequence_number > c->rx_seq + 1) {
+        gap = (int64_t)(env->sequence_number - c->rx_seq - 1);
+        tss->stats.reliability_gaps += (uint64_t)gap;
+    }
+    if (!c->rx_seen || env->source_id != c->rx_source ||
+        env->sequence_number > c->rx_seq) {
+        c->rx_source = env->source_id;
+        c->rx_seq = env->sequence_number;
+        c->rx_seen = 1;
+    }
+    return gap;
 }
 
 /* Shared receive core: validate, block on the transport, enforce
@@ -940,13 +1034,16 @@ static FACE_TSS_RETURN_CODE receive_envelope(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
     FACE_TIMEOUT_TYPE timeout_ns, size_t min_message_size,
     FACE_TSS_TRANSACTION_ID_TYPE *transaction_id,
-    FACE_TSS_ENVELOPE *env)
+    FACE_TSS_ENVELOPE *env, int64_t *seq_gap_out)
 {
     FACE_TSS_CONN *c;
     FACE_TSS_TRANSPORT *tr;
     FACE_TSS_RETURN_CODE rc;
+    int64_t prio_threshold = 0; /* QoS priority filter, snapshotted */
+    int64_t seq_gap = -1;       /* -1 = reliability monitoring inactive */
+    int64_t deadline_ns = -1;   /* -1 = infinite */
     int teardown;
-    if (!tss || !transaction_id || !env)
+    if (!tss || !transaction_id || !env || !seq_gap_out)
         return FACE_TSS_RC_INVALID_PARAM;
     rc = tss_enter_io(tss);
     if (rc != FACE_TSS_RC_NO_ERROR)
@@ -969,11 +1066,63 @@ static FACE_TSS_RETURN_CODE receive_envelope(
         return FACE_TSS_RC_INVALID_MODE;
     }
     tr = c->transport;
+    {
+        int64_t pv = 0;
+        if (face_tss_qos_get_policy(tss->qos, connection_id,
+                                    FACE_TSS_QOS_PRIORITY, &pv) ==
+            FACE_TSS_RC_NO_ERROR)
+            prio_threshold = pv;
+    }
     conn_ref(c);
     lock_drop(tss);
 
-    face_tss_envelope_init(env);
-    rc = face_tss_transport_receive(tr, timeout_ns, env);
+    /* Priority enforcement: messages below the connection's priority
+     * threshold are dropped and the receive keeps waiting for a
+     * qualifying message until the timeout expires (deadline-based, so
+     * drops do not extend the caller's timeout). A poll (timeout 0)
+     * tries once; an infinite timeout waits until a qualifying message
+     * arrives or the wait is interrupted (e.g. by destroy). There is no
+     * FACE return code for "dropped by priority policy", so the drop
+     * surfaces as TIMED_OUT when nothing qualifying arrives in time. */
+    if (timeout_ns > 0)
+        deadline_ns = now_ns() + timeout_ns;
+    for (;;) {
+        FACE_TIMEOUT_TYPE remaining = timeout_ns;
+        if (deadline_ns >= 0) {
+            remaining = deadline_ns - now_ns();
+            if (remaining <= 0) {
+                rc = FACE_TSS_RC_TIMED_OUT;
+                break;
+            }
+        }
+        face_tss_envelope_init(env);
+        rc = face_tss_transport_receive(tr, remaining, env);
+        if (rc != FACE_TSS_RC_NO_ERROR) {
+            face_tss_envelope_fini(env);
+            break;
+        }
+        /* Reliability gap bookkeeping observes every envelope that
+         * arrives on the wire, before policy filtering: a stale or
+         * priority-dropped message was not lost in transport, so it
+         * must not surface as a phantom gap on a later message. The
+         * reported gap is always the delivered message's own. */
+        lock_take(tss);
+        seq_gap = rx_gap_locked(tss, c, connection_id, env);
+        lock_drop(tss);
+        if (prio_threshold > 0 && env->priority < prio_threshold) {
+            face_tss_envelope_fini(env);
+            lock_take(tss);
+            tss->stats.priority_dropped++;
+            lock_drop(tss);
+            if (timeout_ns == 0) {
+                /* Poll: one attempt only. */
+                rc = FACE_TSS_RC_TIMED_OUT;
+                break;
+            }
+            continue;
+        }
+        break;
+    }
 
     lock_take(tss);
     if (rc == FACE_TSS_RC_TIMED_OUT) {
@@ -998,12 +1147,15 @@ static FACE_TSS_RETURN_CODE receive_envelope(
                 tss->stats.stale_dropped++;
                 rc = FACE_TSS_RC_MESSAGE_STALE;
             } else {
+                /* seq_gap was already recorded per wire-observed
+                 * envelope in the loop above. */
                 tss->stats.received++;
             }
         }
     }
     if (rc != FACE_TSS_RC_NO_ERROR)
         face_tss_envelope_fini(env);
+    *seq_gap_out = seq_gap;
     teardown = conn_release_locked(tss, c);
     tss_exit_io_locked(tss);
     lock_drop(tss);
@@ -1021,15 +1173,16 @@ FACE_TSS_RETURN_CODE face_tss_receive_message(
 {
     FACE_TSS_RETURN_CODE rc;
     FACE_TSS_ENVELOPE env;
+    int64_t seq_gap = -1;
     if (!msg_out)
         return FACE_TSS_RC_INVALID_PARAM;
     rc = receive_envelope(tss, connection_id, timeout_ns, min_message_size,
-                          transaction_id, &env);
+                          transaction_id, &env, &seq_gap);
     if (rc != FACE_TSS_RC_NO_ERROR)
         return rc;
     envelope_to_message(&env, msg_out);
     *transaction_id = env.transaction_id;
-    qos_fill(qos_out, env.timestamp_ns);
+    qos_fill(qos_out, &env, seq_gap);
     face_tss_envelope_fini(&env);
     if (msg_out->payload_len > 0 && !msg_out->payload)
         return FACE_TSS_RC_NOT_AVAILABLE;
@@ -1047,10 +1200,11 @@ FACE_TSS_RETURN_CODE face_tss_receive_message_into(
 {
     FACE_TSS_RETURN_CODE rc;
     FACE_TSS_ENVELOPE env;
+    int64_t seq_gap = -1;
     if (!payload_len_out || (buffer_capacity > 0 && !buffer))
         return FACE_TSS_RC_INVALID_PARAM;
     rc = receive_envelope(tss, connection_id, timeout_ns, min_message_size,
-                          transaction_id, &env);
+                          transaction_id, &env, &seq_gap);
     if (rc != FACE_TSS_RC_NO_ERROR)
         return rc;
     if (env.payload_len > buffer_capacity) {
@@ -1069,7 +1223,7 @@ FACE_TSS_RETURN_CODE face_tss_receive_message_into(
         header_out->source_uid = env.source_id;
         header_out->timestamp = env.timestamp_ns;
     }
-    qos_fill(qos_out, env.timestamp_ns);
+    qos_fill(qos_out, &env, seq_gap);
     face_tss_envelope_fini(&env);
     return FACE_TSS_RC_NO_ERROR;
 }
@@ -1114,10 +1268,16 @@ static void cb_dispatch(const FACE_TSS_ENVELOPE *env, void *user)
     FACE_TSS_CONNECTION_ID_TYPE id = ctx->id;
     FACE_TSS_QOS_EVENT qos;
     FACE_TSS_RETURN_CODE cb_rc = FACE_TSS_RC_NO_ERROR;
+    int64_t seq_gap = -1; /* -1 = reliability monitoring inactive */
     lock_take(tss);
     {
         FACE_TSS_CONN *c = find_open(tss, id);
         if (c && c->cb) {
+            /* Reliability gap bookkeeping observes every envelope that
+             * arrives on the wire, before policy filtering: a stale or
+             * priority-dropped message was not lost in transport, so it
+             * must not surface as a phantom gap on a later message. */
+            seq_gap = rx_gap_locked(tss, c, id, env);
             /* Stale messages are dropped, not delivered to the
              * callback; there is no return-code channel here, so the
              * drop is recorded in stats. */
@@ -1129,8 +1289,20 @@ static void cb_dispatch(const FACE_TSS_ENVELOPE *env, void *user)
             if (qrc == FACE_TSS_RC_MESSAGE_STALE) {
                 tss->stats.stale_dropped++;
             } else {
-                cb = c->cb;
-                cb_user = c->cb_user;
+                /* Priority enforcement: below-threshold messages are
+                 * dropped, not delivered; the drop is recorded in
+                 * stats. */
+                int64_t pt = 0, pv = 0;
+                if (face_tss_qos_get_policy(tss->qos, id,
+                                            FACE_TSS_QOS_PRIORITY,
+                                            &pv) == FACE_TSS_RC_NO_ERROR)
+                    pt = pv;
+                if (pt > 0 && env->priority < pt) {
+                    tss->stats.priority_dropped++;
+                } else {
+                    cb = c->cb;
+                    cb_user = c->cb_user;
+                }
             }
         }
         tss->stats.received++;
@@ -1140,7 +1312,7 @@ static void cb_dispatch(const FACE_TSS_ENVELOPE *env, void *user)
         return;
     /* NOTE: ctx is owned by the connection; freed on unregister/destroy. */
     envelope_to_message(env, &msg);
-    qos_fill(&qos, env->timestamp_ns);
+    qos_fill(&qos, env, seq_gap);
     cb(id, env->transaction_id, env->message_guid,
        msg.payload, msg.payload_len,
        &msg.header, &qos, cb_user, &cb_rc);
