@@ -44,10 +44,10 @@ class RegionError(Exception):
     """A USER CODE region marker is duplicated or unbalanced."""
 
 
-_BEGIN_RE = re.compile(r"/\* USER CODE BEGIN: ([A-Za-z_][A-Za-z0-9_]*) \*/")
-_END_RE = re.compile(r"/\* USER CODE END: ([A-Za-z_][A-Za-z0-9_]*) \*/")
+_BEGIN_RE = re.compile(r"/\* USER CODE BEGIN: ([A-Za-z_][A-Za-z0-9_]*) \*/\r?")
+_END_RE = re.compile(r"/\* USER CODE END: ([A-Za-z_][A-Za-z0-9_]*) \*/\r?")
 _PAIR_RE = re.compile(
-    r"^[ \t]*/\* USER CODE BEGIN: ([A-Za-z_][A-Za-z0-9_]*) \*/\n"
+    r"^[ \t]*/\* USER CODE BEGIN: ([A-Za-z_][A-Za-z0-9_]*) \*/\r?\n"
     r"(.*?)"
     r"^[ \t]*/\* USER CODE END: \1 \*/",
     re.DOTALL | re.MULTILINE,
@@ -60,6 +60,9 @@ _DIRECTION_C = {
 _ROLE_C = {
     "publisher": "FACE_TSS_ROLE_PUBLISHER",
     "subscriber": "FACE_TSS_ROLE_SUBSCRIBER",
+}
+_TRANSPORT_C = {
+    "pubsub": "FACE_TSS_TRANSPORT_PUBSUB",
 }
 
 
@@ -101,24 +104,6 @@ def default_regions(model):
             todo = "/* TODO: handle msg. */\n(void)msg;\n"
         regions[c.callback] = todo
     return regions
-
-
-def _members(model):
-    """Map each connection to its lowercase C member stem.
-
-    Raises RegionError-free ValueError on case-insensitive collisions.
-    """
-    seen = {}
-    out = {}
-    for c in model.connections:
-        stem = c.name.lower()
-        if stem in seen:
-            raise ValueError(
-                f"connections '{seen[stem]}' and '{c.name}' collide "
-                f"as C identifiers")
-        seen[stem] = c.name
-        out[c.name] = stem
-    return out
 
 
 def _callback_sig():
@@ -268,6 +253,7 @@ def emit_uop_c(model, regions):
     L.append("                                           const char *name,")
     L.append("                                           const char *address,")
     L.append("                                           FACE_TSS_DIRECTION direction,")
+    L.append("                                           FACE_TSS_TRANSPORT_KIND transport,")
     L.append("                                           FACE_TSS_ROLE role)")
     L.append("{")
     L.append("    FACE_TSS_CONNECTION_CONFIG c;")
@@ -276,7 +262,7 @@ def emit_uop_c(model, regions):
     L.append("    strncpy(c.name, name, sizeof(c.name) - 1);")
     L.append("    strncpy(c.address, address, sizeof(c.address) - 1);")
     L.append("    c.direction = direction;")
-    L.append("    c.transport = FACE_TSS_TRANSPORT_PUBSUB;")
+    L.append("    c.transport = transport;")
     L.append("    c.role = role;")
     L.append("    c.max_message_size = MAX_MESSAGE_SIZE;")
     L.append("    c.queue_depth = QUEUE_DEPTH;")
@@ -333,7 +319,7 @@ def emit_uop_c(model, regions):
         stem = members[c.name]
         L.append(f"    CHECK_RC(add_connection(&cfg, \"{c.name}\", {stem}_addr,")
         L.append(f"                            {_DIRECTION_C[c.direction]},"
-                 f" {_ROLE_C[c.role]}));")
+                 f" {_TRANSPORT_C[c.transport]}, {_ROLE_C[c.role]}));")
     L.append("")
     L.append("    /* 2. Create + initialize the TSS instance. */")
     L.append(f'    ctx.tss = face_tss_create("{uop}");')

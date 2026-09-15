@@ -7,9 +7,11 @@ Supports exactly:
   - comments:   # ...  (outside quotes, after whitespace or at line start)
   - indentation: spaces only, consistent
 
-Anything else (tabs, flow syntax ``{a: b}`` / ``[1, 2]``, anchors, tags,
-multi-line scalars, escapes inside quotes) is a hard error carrying a
-line number. This is deliberately NOT YAML: it parses a tiny, predictable
+Anything else is a hard error carrying a line number: tabs, flow syntax
+``{a: b}`` / ``[1, 2]``, nested lists (``- - x``), and multi-line scalars.
+Anchors (``&a``), tags (``!!str``), and backslash escapes are NOT
+interpreted — they are kept literally as bare-word characters, exactly
+as written. This is deliberately NOT YAML: it parses a tiny, predictable
 subset and rejects the rest, so descriptor authors get errors instead of
 surprises.
 """
@@ -64,6 +66,8 @@ def _desugar(raw):
     for lineno, indent, text in raw:
         if text == "-" or text.startswith("- "):
             body = text[1:].strip()
+            if body == "-" or body.startswith("- "):
+                raise YSubError(lineno, "nested lists are not supported")
             out.append((lineno, indent, "-"))
             if body:
                 out.append((lineno, indent + 2, body))

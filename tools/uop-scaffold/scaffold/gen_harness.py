@@ -35,6 +35,9 @@ _MIRROR_ROLE = {
     "publisher": "FACE_TSS_ROLE_SUBSCRIBER",
     "subscriber": "FACE_TSS_ROLE_PUBLISHER",
 }
+_MIRROR_TRANSPORT = {
+    "pubsub": "FACE_TSS_TRANSPORT_PUBSUB",
+}
 
 # Fixed base port for the CTest loopback. Must be free at test time;
 # override by editing the generated CMakeLists.
@@ -140,7 +143,6 @@ def emit_harness_c(model, regions):
         L.append("/* ------------------------------------------------------------------ */")
     for c in h_pubs:
         t = model.type_by_name(c.type)
-        stem = members[c.name]
         L.append(f"FACE_TSS_RETURN_CODE send_{c.name}(FACE_TSS *tss,")
         L.append(f"        FACE_TSS_CONNECTION_ID_TYPE conn, const {t.name}_t *msg)")
         L.append("{")
@@ -215,7 +217,7 @@ def emit_harness_c(model, regions):
         L.append(f'    strncpy(cc.name, "{c.name}", sizeof(cc.name) - 1);')
         L.append(f"    strncpy(cc.address, {stem}_addr, sizeof(cc.address) - 1);")
         L.append(f"    cc.direction = {_MIRROR_DIRECTION[c.direction]};")
-        L.append("    cc.transport = FACE_TSS_TRANSPORT_PUBSUB;")
+        L.append(f"    cc.transport = {_MIRROR_TRANSPORT[c.transport]};")
         L.append(f"    cc.role = {_MIRROR_ROLE[c.role]};")
         L.append("    cc.max_message_size = MAX_MESSAGE_SIZE;")
         L.append("    cc.queue_depth = 64;")

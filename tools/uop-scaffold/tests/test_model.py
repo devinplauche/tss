@@ -1,10 +1,13 @@
 """Tests for descriptor validation."""
 
+from pathlib import Path
+
 import pytest
 
 from scaffold.model import load_descriptor, DescriptorError
 
-SENSOR = "/home/hatch/workspace/uop-scaffolder/phase0/sensor_uop.yaml"
+_HERE = Path(__file__).resolve().parent
+SENSOR = str(_HERE.parent / "examples" / "sensor" / "sensor_uop.yaml")
 
 BASE = """\
 uop:

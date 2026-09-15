@@ -1,6 +1,7 @@
 """Tests for the loopback harness generator (Phase 3)."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -18,8 +19,20 @@ from scaffold.gen_uop import (
 )
 from scaffold.model import load_descriptor
 
-SENSOR = "/home/hatch/workspace/uop-scaffolder/phase0/sensor_uop.yaml"
-TSS_ROOT = "/home/hatch/workspace/tss"
+_HERE = Path(__file__).resolve().parent
+SENSOR = str(_HERE.parent / "examples" / "sensor" / "sensor_uop.yaml")
+
+
+def _find_tss_root():
+    d = _HERE
+    for _ in range(8):
+        if (d / "c" / "include" / "face_tss" / "tss.h").exists():
+            return str(d)
+        d = d.parent
+    raise RuntimeError("could not locate the tss repo root")
+
+
+TSS_ROOT = _find_tss_root()
 
 
 @pytest.fixture(scope="module")
@@ -104,3 +117,95 @@ def test_harness_compiles_clean(tmp_path, model):
          "-Wl,-rpath," + f"{TSS_ROOT}/build"],
         capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, f"compile failed:\n{r.stderr}"
+
+
+PUB_ONLY = """\
+uop:
+  name: pubonly
+  language: c99
+  profile: general_purpose
+  types:
+    - name: msg
+      fields:
+        - name: a
+          type: int32
+  connections:
+    - name: OUT
+      direction: source
+      transport: pubsub
+      role: publisher
+      type: msg
+"""
+
+SUB_ONLY = """\
+uop:
+  name: subonly
+  language: c99
+  profile: general_purpose
+  types:
+    - name: msg
+      fields:
+        - name: a
+          type: int32
+  connections:
+    - name: IN
+      direction: destination
+      transport: pubsub
+      role: subscriber
+      type: msg
+      callback: on_msg
+"""
+
+
+def _load_text(tmp_path, text, name):
+    p = tmp_path / f"{name}.yaml"
+    p.write_text(text)
+    return load_descriptor(str(p))
+
+
+def test_publisher_only_mirror(tmp_path):
+    model = _load_text(tmp_path, PUB_ONLY, "pubonly")
+    files, orphans = generate_tree(model, {}, {})
+    assert orphans == []
+    uop_src, harness_src = files["pubonly.c"], files["pubonly_harness.c"]
+    assert "register_callback" not in uop_src
+    assert "No subscriptions" in uop_src
+    assert "publish_OUT" in uop_src
+    assert "send_OUT" not in harness_src
+    assert "recv_OUT" in harness_src
+    assert "recv_OUT(tss" in default_regions(model)["drive"]
+
+
+def test_subscriber_only_mirror(tmp_path):
+    model = _load_text(tmp_path, SUB_ONLY, "subonly")
+    files, orphans = generate_tree(model, {}, {})
+    assert orphans == []
+    uop_src, harness_src = files["subonly.c"], files["subonly_harness.c"]
+    assert "on_msg" in uop_src
+    assert "publish_" not in uop_src
+    assert "send_IN" in harness_src
+    assert "recv_IN" not in harness_src
+    assert "send_IN(tss" in default_regions(model)["drive"]
+
+
+def _cmake_build(tmp_path, gen_dir):
+    build = tmp_path / "build"
+    cfg = subprocess.run(
+        ["cmake", "-S", str(gen_dir), "-B", str(build),
+         f"-DTSS_ROOT={TSS_ROOT}"],
+        capture_output=True, text=True, timeout=120)
+    assert cfg.returncode == 0, f"cmake configure failed:\n{cfg.stderr}"
+    bld = subprocess.run(["cmake", "--build", str(build)],
+                         capture_output=True, text=True, timeout=300)
+    assert bld.returncode == 0, f"cmake build failed:\n{bld.stderr}"
+
+
+@pytest.mark.parametrize("text,name", [(PUB_ONLY, "pubonly"),
+                                       (SUB_ONLY, "subonly")])
+def test_single_role_tree_compiles_clean(tmp_path, text, name):
+    """Publisher-only and subscriber-only trees build under -Werror."""
+    model = _load_text(tmp_path, text, name)
+    out = tmp_path / "gen"
+    files, _ = generate_tree(model, {}, {})
+    write_tree(out, files)
+    _cmake_build(tmp_path, out)

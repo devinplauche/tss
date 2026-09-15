@@ -52,7 +52,7 @@ Rules, enforced with line-numbered errors:
 - `role: subscriber` requires `direction: destination` and a `callback`;
   `role: publisher` requires `direction: source` and forbids `callback`.
 - Field types are scalars: `int8/16/32/64`, `uint8/16/32/64`, `float`,
-  `double`, `bool`, `char`. Every connection's `type` must name a type in
+  `double`, `bool`. Every connection's `type` must name a type in
   `types:`.
 - The parser accepts a deliberately small YAML subset (mappings, lists,
   bare/integer/quoted scalars, comments). Tabs, flow `{...}`/`[...]`
@@ -129,6 +129,9 @@ false PASS. CMake registers it as `ctest` test `<uop>_loopback`.
   haven't written the `drive` test yet.
 - Harness reports `TIMED_OUT` — the UoP side likely isn't publishing, or
   the two processes disagree on the base port.
+- `ctest` fails with address-in-use errors — the loopback base port
+  (default 48601, set in the generated `CMakeLists.txt`) is taken; stop
+  the other process or change the port and rebuild.
 
 ## Layout
 

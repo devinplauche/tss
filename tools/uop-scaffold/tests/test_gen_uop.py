@@ -2,6 +2,7 @@
 
 import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -17,8 +18,20 @@ from scaffold.gen_uop import (
 )
 from scaffold.model import load_descriptor
 
-SENSOR = "/home/hatch/workspace/uop-scaffolder/phase0/sensor_uop.yaml"
-TSS_ROOT = "/home/hatch/workspace/tss"
+_HERE = Path(__file__).resolve().parent
+SENSOR = str(_HERE.parent / "examples" / "sensor" / "sensor_uop.yaml")
+
+
+def _find_tss_root():
+    d = _HERE
+    for _ in range(8):
+        if (d / "c" / "include" / "face_tss" / "tss.h").exists():
+            return str(d)
+        d = d.parent
+    raise RuntimeError("could not locate the tss repo root")
+
+
+TSS_ROOT = _find_tss_root()
 
 
 @pytest.fixture(scope="module")
@@ -140,3 +153,15 @@ def test_generated_tree_compiles_clean(tmp_path, model):
     files, _ = generate_tree(model, {})
     write_tree(out, files)
     _compile(tmp_path, out / "sensor_uop.c")
+
+
+def test_regions_survive_crlf(model):
+    """Region markers are found in CRLF-edited files (no silent data loss)."""
+    files, _ = generate_tree(model, {}, {})
+    crlf = files["sensor_uop.c"].replace("\n", "\r\n")
+    regions = extract_regions(crlf)
+    assert "on_raw_detection" in regions
+    regions["on_raw_detection"] = "MARKER_BODY();\r\n"
+    files2, orphans = generate_tree(model, regions, {})
+    assert orphans == []
+    assert "MARKER_BODY();" in files2["sensor_uop.c"]

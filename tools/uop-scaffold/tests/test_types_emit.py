@@ -7,13 +7,15 @@ little-endian wire bytes plus decode round-trip.
 
 import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from scaffold.model import load_descriptor
 from scaffold.types_emit import emit_types_header
 
-SENSOR = "/home/hatch/workspace/uop-scaffolder/phase0/sensor_uop.yaml"
+_HERE = Path(__file__).resolve().parent
+SENSOR = str(_HERE.parent / "examples" / "sensor" / "sensor_uop.yaml")
 
 
 @pytest.fixture(scope="module")

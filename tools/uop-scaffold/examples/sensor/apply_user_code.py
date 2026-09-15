@@ -25,7 +25,8 @@ def main():
         dest = targets[target]
         text = dest.read_text()
         pat = re.compile(
-            r"(^[ \t]*/\* USER CODE BEGIN: %s \*/\n)(.*?)(^[ \t]*/\* USER CODE END: %s \*/)"
+            r"(^[ \t]*/\* USER CODE BEGIN: %s \*/\r?\n)(.*?)"
+            r"(^[ \t]*/\* USER CODE END: %s \*/)"
             % (re.escape(region), re.escape(region)),
             re.DOTALL | re.MULTILINE)
         m = pat.search(text)

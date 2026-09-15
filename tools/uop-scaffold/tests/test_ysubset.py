@@ -1,10 +1,13 @@
 """Tests for the restricted YAML-subset parser."""
 
+from pathlib import Path
+
 import pytest
 
 from scaffold.ysubset import parse, YSubError
 
-SENSOR = open("/home/hatch/workspace/uop-scaffolder/phase0/sensor_uop.yaml").read()
+_HERE = Path(__file__).resolve().parent
+SENSOR = (_HERE.parent / "examples" / "sensor" / "sensor_uop.yaml").read_text()
 
 
 def test_parses_real_descriptor():
@@ -74,3 +77,13 @@ def test_rejects_top_level_list():
 def test_rejects_empty():
     with pytest.raises(YSubError):
         parse("# nothing here\n")
+
+
+def test_rejects_nested_list():
+    with pytest.raises(YSubError):
+        parse("uop:\n  name: x\n  items:\n    - - a\n")
+
+
+def test_negative_int_list_item():
+    # "- -5" is the integer -5, not a nested list.
+    assert parse("items:\n  - -5\n") == {"items": [-5]}

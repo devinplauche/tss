@@ -28,7 +28,11 @@ grep -q "send_RAW_DETECTION(tss" "$GEN/sensor_uop_harness.c" || { echo "FAIL: dr
 echo "user code preserved"
 
 echo "== build =="
-cmake -S "$GEN" -B "$GEN/build" -DTSS_ROOT="$TSS_ROOT" > /dev/null
+if ! cmake -S "$GEN" -B "$GEN/build" -DTSS_ROOT="$TSS_ROOT" > "$GEN/cmake-config.log" 2>&1; then
+  echo "cmake configure failed:"
+  cat "$GEN/cmake-config.log"
+  exit 1
+fi
 cmake --build "$GEN/build"
 
 echo "== test =="
