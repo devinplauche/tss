@@ -308,3 +308,48 @@ def test_subscriber_first_connects(tcp_addr):
     assert got >= 10
     pub.finalize()
     sub.finalize()
+
+
+def test_pubsub_inproc_round_trip():
+    """Same pub/sub round trip as TCP, but over nng inproc:// (in-process).
+
+    No code changes were needed to support this: the transport layer passes
+    the address straight through to nng, which ships an inproc transport.
+    inproc names are process-global, so use a unique name per test.
+    """
+    addr = "inproc://tss-test-inproc-round-trip"
+    pub_cfg = (
+        TssConfigBuilder()
+        .add("POSITION", direction=Direction.BI_DIRECTIONAL,
+             transport="pubsub", role="publisher", address=addr)
+        .build()
+    )
+    sub_cfg = (
+        TssConfigBuilder()
+        .add("POSITION", direction=Direction.BI_DIRECTIONAL,
+             transport="pubsub", role="subscriber", address=addr)
+        .build()
+    )
+    pub = FaceTss("pub")
+    sub = FaceTss("sub")
+    pub.initialize(pub_cfg)
+    sub.initialize(sub_cfg)
+    pub_id, _ = pub.create_connection("position")
+    sub_id, _ = sub.create_connection("POSITION")
+    try:
+        time.sleep(0.4)  # dial + subscription settle
+        report = PositionReport("N123", 37.5, -122.25, 1500.0, 270.0, True)
+        used = pub.send_message(pub_id, report.serialize(), 5_000_000_000,
+                                transaction_id=11)
+        assert used == 11
+        msg, txn, qos = sub.receive_message(sub_id, timeout_ns=5_000_000_000)
+        assert PositionReport.deserialize(msg.payload) == report
+        assert txn == 11
+        assert msg.header.source_uid == pub.source_id
+        assert msg.header.instance_uid != 0
+        assert msg.header.timestamp > 0
+        assert len(qos) == 1
+        assert qos[0].name == "message_age_ns"
+    finally:
+        pub.finalize()
+        sub.finalize()
