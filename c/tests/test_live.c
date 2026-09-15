@@ -528,6 +528,85 @@ static void t_subscriber_first(void)
     TEST_END();
 }
 
+static void t_qos_staleness(void)
+{
+    char a[64];
+    FACE_TSS_CONFIG pc, sc;
+    FACE_TSS *pub, *sub;
+    FACE_TSS_CONNECTION_ID_TYPE pid, sid;
+    FACE_TSS_MESSAGE_SIZE_TYPE mx;
+    FACE_TSS_TRANSACTION_ID_TYPE txn;
+    FACE_TSS_MESSAGE m;
+    FACE_TSS_STATS stats;
+    int64_t val;
+    TEST_BEGIN("qos_staleness");
+    addr(a);
+    mk_cfg(&pc, "POSITION", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_PUBLISHER);
+    mk_cfg(&sc, "POSITION", a, FACE_TSS_BI_DIRECTIONAL,
+           FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_SUBSCRIBER);
+    pub = face_tss_create("pub");
+    sub = face_tss_create("sub");
+    CHECK_RC(face_tss_initialize(pub, &pc), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_initialize(sub, &sc), FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(pub, "position", &pid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_create_connection(sub, "POSITION", &sid, &mx, 0),
+             FACE_TSS_RC_NO_ERROR);
+    msleep(400);
+    /* policy API validation */
+    CHECK_RC(face_tss_set_qos_policy(sub, 999, FACE_TSS_QOS_STALENESS, 1000),
+             FACE_TSS_RC_CONNECTION_CLOSED);
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_STALENESS, -1),
+             FACE_TSS_RC_INVALID_PARAM);
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_STALENESS,
+                                     100000000LL /* 100ms */),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_get_qos_policy(sub, sid, FACE_TSS_QOS_STALENESS, &val),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(val == 100000000LL);
+    CHECK_RC(face_tss_get_qos_policy(sub, sid, FACE_TSS_QOS_PRIORITY, &val),
+             FACE_TSS_RC_NO_ACTION);
+    /* MAX_AGE is a documented alias for STALENESS */
+    CHECK_RC(face_tss_set_qos_policy(sub, sid, FACE_TSS_QOS_MAX_AGE,
+                                     200000000LL /* 200ms */),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK_RC(face_tss_get_qos_policy(sub, sid, FACE_TSS_QOS_STALENESS, &val),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(val == 200000000LL);
+    /* stale message -> discarded, MESSAGE_STALE */
+    txn = 1;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"old", 3),
+             FACE_TSS_RC_NO_ERROR);
+    msleep(300); /* exceed the 200ms threshold */
+    memset(&m, 0, sizeof(m));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      NULL),
+             FACE_TSS_RC_MESSAGE_STALE);
+    CHECK_RC(face_tss_stats(sub, &stats), FACE_TSS_RC_NO_ERROR);
+    CHECK(stats.stale_dropped == 1);
+    /* fresh message still delivers normally */
+    txn = 2;
+    CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
+                                   (const uint8_t *)"new", 3),
+             FACE_TSS_RC_NO_ERROR);
+    memset(&m, 0, sizeof(m));
+    txn = 0;
+    CHECK_RC(face_tss_receive_message(sub, sid, 5000000000LL, 0, &txn, &m,
+                                      NULL),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(m.payload_len == 3);
+    CHECK(memcmp(m.payload, "new", 3) == 0);
+    face_tss_message_fini(&m);
+    face_tss_destroy(pub);
+    face_tss_destroy(sub);
+    face_tss_config_fini(&pc);
+    face_tss_config_fini(&sc);
+    TEST_END();
+}
+
 int main(void)
 {
     printf("[live]\n");
@@ -539,5 +618,6 @@ int main(void)
     t_oversize();
     t_receive_into();
     t_callback();
+    t_qos_staleness();
     return TEST_SUMMARY();
 }

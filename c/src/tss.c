@@ -2,6 +2,7 @@
 
 #include "face_tss/tss.h"
 #include "face_tss/configuration.h"
+#include "face_tss/qos.h"
 #include "face_tss/typed.h"
 #include "tss_priv.h"
 
@@ -55,6 +56,7 @@ struct FACE_TSS {
     FACE_TSS_STATS stats;
     FACE_TSS_CONFIGURATION config_iface; /* copied by Set_Reference */
     int config_iface_set;
+    FACE_TSS_QOS *qos; /* per-connection QoS policies (staleness etc.) */
 };
 
 /* ------------------------------------------------------------------ */
@@ -195,6 +197,14 @@ FACE_TSS *face_tss_create(const char *instance_name)
     t->next_txn = 1;
     t->next_id = 1;
     face_tss_config_init(&t->config, t->instance_name);
+    t->qos = face_tss_qos_create();
+    if (!t->qos) {
+        face_tss_config_fini(&t->config);
+        lock_init(t);
+        lock_fini(t);
+        free(t);
+        return NULL;
+    }
     lock_init(t);
     return t;
 }
@@ -230,6 +240,8 @@ void face_tss_destroy(FACE_TSS *tss)
     tss->conns = NULL;
     tss->conns_cap = 0;
     face_tss_config_fini(&tss->config);
+    face_tss_qos_destroy(tss->qos);
+    tss->qos = NULL;
     tss->initialized = 0;
     lock_drop(tss);
     lock_fini(tss);
@@ -529,8 +541,62 @@ FACE_TSS_RETURN_CODE face_tss_destroy_connection(
     destroy_conn(tss->conns[idx]);
     tss->conns[idx] = NULL;
     tss->conns_open--;
+    /* Drop any QoS policies so the (capped) policy table cannot fill
+     * with entries for dead connections. */
+    face_tss_qos_clear_policies(tss->qos, connection_id);
     lock_drop(tss);
     return FACE_TSS_RC_NO_ERROR;
+}
+
+/* ------------------------------------------------------------------ */
+/* QoS policies (extensions; not in the FACE IDL)                      */
+/* ------------------------------------------------------------------ */
+
+FACE_TSS_RETURN_CODE face_tss_set_qos_policy(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TSS_QOS_POLICY_KIND kind, int64_t value_ns)
+{
+    FACE_TSS_RETURN_CODE rc;
+    if (!tss)
+        return FACE_TSS_RC_INVALID_PARAM;
+    if (kind == FACE_TSS_QOS_MAX_AGE)
+        kind = FACE_TSS_QOS_STALENESS; /* documented alias */
+    lock_take(tss);
+    if (!tss->initialized) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    if (!find_open(tss, connection_id)) {
+        lock_drop(tss);
+        return FACE_TSS_RC_CONNECTION_CLOSED;
+    }
+    rc = face_tss_qos_set_policy(tss->qos, connection_id, kind, value_ns);
+    lock_drop(tss);
+    return rc;
+}
+
+FACE_TSS_RETURN_CODE face_tss_get_qos_policy(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TSS_QOS_POLICY_KIND kind, int64_t *value_ns_out)
+{
+    FACE_TSS_RETURN_CODE rc;
+    if (!tss)
+        return FACE_TSS_RC_INVALID_PARAM;
+    if (kind == FACE_TSS_QOS_MAX_AGE)
+        kind = FACE_TSS_QOS_STALENESS; /* documented alias */
+    lock_take(tss);
+    if (!tss->initialized) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    if (!find_open(tss, connection_id)) {
+        lock_drop(tss);
+        return FACE_TSS_RC_CONNECTION_CLOSED;
+    }
+    rc = face_tss_qos_get_policy(tss->qos, connection_id, kind,
+                                 value_ns_out);
+    lock_drop(tss);
+    return rc;
 }
 
 static int can_send(const FACE_TSS_CONN *c)
@@ -640,8 +706,9 @@ static void envelope_to_message(const FACE_TSS_ENVELOPE *env, FACE_TSS_MESSAGE *
 
 /* Populate the QoS event with honest, transport-observable data.
  * Currently one element: message_age_ns (receive time minus the send
- * timestamp in the header). No QoS policies are enforced and MESSAGE_STALE
- * is never produced; see issue #2. */
+ * timestamp in the header). Staleness enforcement happens upstream in
+ * receive_envelope / cb_dispatch, so by the time this runs the message
+ * is known-fresh (or no staleness policy is set); see issue #2. */
 static void qos_fill(FACE_TSS_QOS_EVENT *qos, int64_t timestamp_ns)
 {
     int64_t age;
@@ -703,6 +770,22 @@ static FACE_TSS_RETURN_CODE receive_envelope(
         face_tss_envelope_fini(env);
         lock_drop(tss);
         return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
+    }
+    /* Staleness enforcement: discard messages older than the
+     * connection's QoS staleness threshold and report MESSAGE_STALE.
+     * No policy -> NO_ACTION -> delivered normally. */
+    {
+        int64_t age = now_ns() - (int64_t)env->timestamp_ns;
+        FACE_TSS_RETURN_CODE qrc;
+        if (age < 0)
+            age = 0;
+        qrc = face_tss_qos_check_staleness(tss->qos, connection_id, age);
+        if (qrc == FACE_TSS_RC_MESSAGE_STALE) {
+            face_tss_envelope_fini(env);
+            tss->stats.stale_dropped++;
+            lock_drop(tss);
+            return FACE_TSS_RC_MESSAGE_STALE;
+        }
     }
     tss->stats.received++;
     lock_drop(tss);
@@ -815,8 +898,20 @@ static void cb_dispatch(const FACE_TSS_ENVELOPE *env, void *user)
     {
         FACE_TSS_CONN *c = find_open(tss, id);
         if (c && c->cb) {
-            cb = c->cb;
-            cb_user = c->cb_user;
+            /* Stale messages are dropped, not delivered to the
+             * callback; there is no return-code channel here, so the
+             * drop is recorded in stats. */
+            int64_t age = now_ns() - (int64_t)env->timestamp_ns;
+            FACE_TSS_RETURN_CODE qrc;
+            if (age < 0)
+                age = 0;
+            qrc = face_tss_qos_check_staleness(tss->qos, id, age);
+            if (qrc == FACE_TSS_RC_MESSAGE_STALE) {
+                tss->stats.stale_dropped++;
+            } else {
+                cb = c->cb;
+                cb_user = c->cb_user;
+            }
         }
         tss->stats.received++;
     }

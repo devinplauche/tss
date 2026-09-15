@@ -51,6 +51,7 @@ from .types import (
     MessageValidity,
     QosElement,
     QosEvent,
+    QosPolicyKind,
     ReturnCode,
     now_ns,
 )
@@ -105,6 +106,7 @@ __all__ = [
     "MessageValidity",
     "QosElement",
     "QosEvent",
+    "QosPolicyKind",
     "ReturnCode",
     "now_ns",
 ]

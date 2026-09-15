@@ -103,8 +103,8 @@ class QosEvent(list):
     """FACE::TSS::QoS_EVENT_TYPE projection: fixed-capacity QoS elements.
 
     Behaves like a list of QosElement capped at FACE_TSS_QOS_EVENT_MAX
-    entries. Receives populate one element, ``message_age_ns``; no QoS
-    policies are enforced (see issue #2).
+    entries. Receives populate one element, ``message_age_ns``; the
+    staleness policy (see QosPolicyKind) is enforced on receive.
     """
 
     def __init__(self, elements: list[QosElement] | None = None) -> None:
@@ -119,6 +119,15 @@ class QosEvent(list):
         if len(self) >= FACE_TSS_QOS_EVENT_MAX:
             raise ValueError("QoS event is full")
         super().append(element)
+
+
+class QosPolicyKind(enum.IntEnum):
+    """QoS policy kinds (mirrors FACE_TSS_QOS_POLICY_KIND in C)."""
+
+    STALENESS = 0  #: max message age (ns) before MESSAGE_STALE
+    MAX_AGE = 1  #: alias for STALENESS
+    PRIORITY = 2  #: message priority hint (stored, not enforced)
+    RELIABILITY = 3  #: reliability level (stored, not enforced)
 
 
 def now_ns() -> int:
@@ -139,5 +148,6 @@ __all__ = [
     "Header",
     "QosElement",
     "QosEvent",
+    "QosPolicyKind",
     "now_ns",
 ]

@@ -353,3 +353,87 @@ def test_pubsub_inproc_round_trip():
     finally:
         pub.finalize()
         sub.finalize()
+
+
+def test_qos_staleness_enforcement(tcp_addr):
+    """Staleness policy: stale messages raise MessageStaleError, fresh pass.
+
+    Mirrors the C t_qos_staleness test: policy set/get validation, the
+    MAX_AGE alias, MESSAGE_STALE on an aged message, stale_dropped stat,
+    and normal delivery of a fresh message.
+    """
+    from face_tss import (
+        ConnectionClosedError,
+        InvalidParamError,
+        MessageStaleError,
+        QosPolicyKind,
+    )
+
+    pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
+    try:
+        # Policy API validation.
+        with pytest.raises(ConnectionClosedError):
+            sub.set_qos_policy(999, QosPolicyKind.STALENESS, 1000)
+        with pytest.raises(InvalidParamError):
+            sub.set_qos_policy(sub_id, QosPolicyKind.STALENESS, -1)
+        assert sub.set_qos_policy(
+            sub_id, QosPolicyKind.STALENESS, 100_000_000
+        ) == ReturnCode.NO_ERROR
+        assert sub.get_qos_policy(
+            sub_id, QosPolicyKind.STALENESS) == 100_000_000
+        assert sub.get_qos_policy(
+            sub_id, QosPolicyKind.PRIORITY) is None
+        # MAX_AGE is a documented alias for STALENESS.
+        sub.set_qos_policy(sub_id, QosPolicyKind.MAX_AGE, 200_000_000)
+        assert sub.get_qos_policy(
+            sub_id, QosPolicyKind.STALENESS) == 200_000_000
+
+        # Aged message -> MessageStaleError, counted in stats.
+        pub.send_message(pub_id, b"old", 5_000_000_000, transaction_id=1)
+        time.sleep(0.3)  # exceed the 200ms threshold
+        with pytest.raises(MessageStaleError) as exc_info:
+            sub.receive_message(sub_id, timeout_ns=5_000_000_000)
+        assert exc_info.value.return_code == ReturnCode.MESSAGE_STALE
+        assert sub.stats.stale_dropped == 1
+
+        # Fresh message delivers normally.
+        pub.send_message(pub_id, b"new", 5_000_000_000, transaction_id=2)
+        msg, txn, qos = sub.receive_message(sub_id,
+                                            timeout_ns=5_000_000_000)
+        assert msg.payload == b"new"
+        assert txn == 2
+        assert len(qos) == 1
+    finally:
+        pub.finalize()
+        sub.finalize()
+
+
+def test_qos_staleness_callback_drop(tcp_addr):
+    """Stale messages are not delivered to registered callbacks."""
+    from face_tss import QosPolicyKind
+
+    pub, pub_id, sub, sub_id = _pubsub_pair(tcp_addr)
+    delivered = []
+    try:
+        sub.register_callback(
+            sub_id,
+            lambda cid, txn, guid, payload, header, qos, ctx:
+                delivered.append(payload),
+        )
+        # Zero threshold: any message that took any time at all is stale,
+        # so the background dispatch drops it deterministically.
+        sub.set_qos_policy(sub_id, QosPolicyKind.STALENESS, 0)
+        pub.send_message(pub_id, b"stale", 5_000_000_000, transaction_id=1)
+        time.sleep(0.5)  # let the background dispatch run
+        assert delivered == []
+        assert sub.stats.stale_dropped >= 1
+        # Generous threshold: fresh messages reach the callback.
+        sub.set_qos_policy(sub_id, QosPolicyKind.STALENESS, 3600_000_000_000)
+        pub.send_message(pub_id, b"fresh", 5_000_000_000, transaction_id=2)
+        deadline = time.time() + 5
+        while not delivered and time.time() < deadline:
+            time.sleep(0.05)
+        assert delivered == [b"fresh"]
+    finally:
+        pub.finalize()
+        sub.finalize()

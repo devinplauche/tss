@@ -197,9 +197,16 @@ Xvfb, so File → Projects → Import could not be reached to load the
 
 ## Partially implemented / known divergences
 - **QoS**: the event carries one honest element per message
-  (`message_age_ns`) on receive and callback paths. No QoS policy
-  management, no staleness enforcement, no `MESSAGE_STALE` production —
-  unsupported FACE QoS guarantees are documented, not emulated.
+  (`message_age_ns`) on receive and callback paths. The staleness
+  policy is enforced: `face_tss_set_qos_policy` /
+  `face_tss_get_qos_policy` (C) and `set_qos_policy` / `get_qos_policy`
+  (Python) manage per-connection policies; messages older than the
+  connection's `STALENESS` threshold (ns) are discarded on receive and
+  the call returns `MESSAGE_STALE` / raises `MessageStaleError`, with
+  the drop counted in `stats.stale_dropped`. Stale messages are not
+  delivered to registered callbacks. `MAX_AGE` is a documented alias
+  for `STALENESS`. Other policy kinds (priority, reliability) are
+  stored, not enforced; there is no cross-connection QoS negotiation.
 - **Receive buffers**: caller-owned receive is `face_tss_receive_message_into`
   (C) / `receive_into` (Python) with full `DATA_BUFFER_TOO_SMALL` + required
   size semantics. The allocating `receive_message` remains as a documented
@@ -222,7 +229,6 @@ Xvfb, so File → Projects → Import could not be reached to load the
   not audited against FACE threading requirements.
 
 ## Remaining gaps (not started)
-- Real QoS management (policies, staleness enforcement, MESSAGE_STALE).
 - TSS distribution / multi-instance discovery beyond static config.
 - Type abstraction beyond the codegen subset.
 - TPM support.

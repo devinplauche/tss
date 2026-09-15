@@ -25,7 +25,10 @@
  *   per-data-type TypedTS projection over registered type support.
  * - The standard's per-receive/per-callback QoS_EVENT_TYPE is plumbed
  *   through; each receive/callback reports one honest element
- *   (message_age_ns). No QoS policies are enforced.
+ *   (message_age_ns). The staleness QoS policy is enforced: messages
+ *   older than the connection's threshold are discarded and the
+ *   receive returns MESSAGE_STALE (callbacks are not invoked for
+ *   stale messages). Other QoS policy kinds are stored, not enforced.
  * - Read_Callback carries a `void *user` context as a C-idiom extension.
  *
  * Connection model (one FACE connection = one nng socket):
@@ -47,6 +50,7 @@
 #include "face_tss/config.h"
 #include "face_tss/configuration.h"
 #include "face_tss/envelope.h"
+#include "face_tss/qos.h"
 #include "face_tss/transport.h"
 #include "face_tss/types.h"
 
@@ -184,6 +188,18 @@ FACE_TSS_RETURN_CODE face_tss_stats(
     FACE_TSS *tss, FACE_TSS_STATS *out);
 FACE_TSS_UID_TYPE face_tss_source_id(FACE_TSS *tss);
 const char *face_tss_rc_str(FACE_TSS_RETURN_CODE rc);
+
+/* QoS policies (extensions; not in the FACE IDL). Set a per-connection
+ * QoS policy (e.g. FACE_TSS_QOS_STALENESS threshold in nanoseconds);
+ * stale messages are discarded on receive and the call returns
+ * MESSAGE_STALE. Get returns NO_ACTION when no policy of that kind
+ * is set. */
+FACE_TSS_RETURN_CODE face_tss_set_qos_policy(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TSS_QOS_POLICY_KIND kind, int64_t value_ns);
+FACE_TSS_RETURN_CODE face_tss_get_qos_policy(
+    FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
+    FACE_TSS_QOS_POLICY_KIND kind, int64_t *value_ns_out);
 
 #ifdef __cplusplus
 }

@@ -57,6 +57,7 @@ from .errors import (
     InvalidConfigError,
     InvalidModeError,
     InvalidParamError,
+    MessageStaleError,
     NotInitializedError,
     ResourceLimitError,
     TimedOutError,
@@ -73,6 +74,7 @@ from .types import (
     MessageValidity,
     QosElement,
     QosEvent,
+    QosPolicyKind,
     ReturnCode,
     now_ns,
 )
@@ -140,6 +142,7 @@ class FaceTss:
         self._configuration_set = False
         self._ids = itertools.count(1)
         self._connections: dict[ConnectionId, _Connection] = {}
+        self._qos_policies: dict[ConnectionId, dict[QosPolicyKind, int]] = {}
         self._stats = TssStats()
 
     # -- properties -----------------------------------------------------
@@ -302,10 +305,63 @@ class FaceTss:
             conn.transport.close()
         except Exception:
             pass
+        self._qos_policies.pop(connection_id, None)
 
     def connection_names(self) -> dict[ConnectionId, str]:
         with self._lock:
             return {cid: c.config.name for cid, c in self._connections.items()}
+
+    # -- QoS policies (extensions; not in the FACE IDL) --------------------
+    def set_qos_policy(
+        self,
+        connection_id: ConnectionId,
+        kind: QosPolicyKind,
+        value_ns: int,
+    ) -> ReturnCode:
+        """Set a per-connection QoS policy.
+
+        The staleness policy (QosPolicyKind.STALENESS / MAX_AGE, in
+        nanoseconds) is enforced: messages older than the threshold are
+        discarded on receive and the receive raises MessageStaleError
+        (callbacks are not invoked for stale messages). Other policy
+        kinds are stored, not enforced.
+        """
+        if value_ns < 0:
+            raise InvalidParamError("QoS policy value must be >= 0")
+        if kind == QosPolicyKind.MAX_AGE:
+            kind = QosPolicyKind.STALENESS  # documented alias
+        with self._lock:
+            self._require_initialized()
+            self._require_open(connection_id)
+            self._qos_policies.setdefault(connection_id, {})[kind] = value_ns
+            return ReturnCode.NO_ERROR
+
+    def get_qos_policy(
+        self, connection_id: ConnectionId, kind: QosPolicyKind
+    ) -> int | None:
+        """Return a connection's QoS policy value, or None if unset."""
+        if kind == QosPolicyKind.MAX_AGE:
+            kind = QosPolicyKind.STALENESS  # documented alias
+        with self._lock:
+            self._require_initialized()
+            self._require_open(connection_id)
+            return self._qos_policies.get(connection_id, {}).get(kind)
+
+    def _is_stale(self, connection_id: ConnectionId, timestamp_ns: int) -> bool:
+        """True if the connection's staleness policy rejects this message.
+
+        Call with the lock held. Records the drop in stats.
+        """
+        threshold = self._qos_policies.get(connection_id, {}).get(
+            QosPolicyKind.STALENESS
+        )
+        if threshold is None:
+            return False
+        age = now_ns() - timestamp_ns
+        if age > threshold:
+            self._stats.stale_dropped += 1
+            return True
+        return False
 
     # -- messaging: Send_Message -----------------------------------------
     def send_message(
@@ -368,8 +424,8 @@ class FaceTss:
         """Honest, transport-observable QoS data for one received message.
 
         Currently one element: message_age_ns (receive time minus the send
-        timestamp). No QoS policies are enforced and MESSAGE_STALE is never
-        produced; see issue #2.
+        timestamp). Staleness enforcement happens in the receive paths
+        before this runs; see issue #2.
         """
         age = now_ns() - env.timestamp_ns
         return QosEvent([QosElement(name="message_age_ns", value=max(age, 0))])
@@ -401,6 +457,10 @@ class FaceTss:
             if len(env.payload) < min_message_size:
                 raise DataBufferTooSmallError(
                     f"payload {len(env.payload)} < required {min_message_size}"
+                )
+            if self._is_stale(connection_id, env.timestamp_ns):
+                raise MessageStaleError(
+                    "message exceeded the connection's staleness policy"
                 )
             self._stats.received += 1
             msg = ReceivedMessage(
@@ -452,6 +512,10 @@ class FaceTss:
                 raise DataBufferTooSmallError(
                     f"payload {len(env.payload)} exceeds buffer "
                     f"{len(buffer)}; required size {len(env.payload)}"
+                )
+            if self._is_stale(connection_id, env.timestamp_ns):
+                raise MessageStaleError(
+                    "message exceeded the connection's staleness policy"
                 )
             buffer[: len(env.payload)] = env.payload
             self._stats.received += 1
@@ -516,6 +580,12 @@ class FaceTss:
                     live = self._connections.get(connection_id)
                     cb = live.callback if live is not None else None
                     ctx = live.callback_context if live is not None else None
+                    # Stale messages are dropped, not delivered; the drop
+                    # is recorded in stats (no return-code channel here).
+                    if cb is not None and self._is_stale(
+                        connection_id, env.timestamp_ns
+                    ):
+                        cb = None
                 if cb is not None:
                     try:
                         cb(
