@@ -53,8 +53,8 @@ def test_loads_sensor_descriptor():
     assert m.name == "sensor_uop"
     assert m.language == "c99"
     assert m.profile == "general_purpose"
-    assert [t.name for t in m.types] == ["raw_detection", "fused_track"]
-    assert m.type_by_name("fused_track").wire_size == 12
+    assert [t.name for t in m.types] == ["raw_detection", "FusedTrack"]
+    assert m.type_by_name("FusedTrack").kind == "idl"
     assert [c.name for c in m.connections] == ["RAW_DETECTION", "FUSED_TRACK"]
     sub = m.connections[0]
     assert (sub.direction, sub.role, sub.callback) == (

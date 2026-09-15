@@ -1,0 +1,29 @@
+// sensor.idl -- IDL-defined message types for the sensor_uop example.
+//
+// The fused track carries a nested struct, an enum, a string, and a
+// sequence: the kind of rich message the scalar-only descriptor language
+// cannot express. The scaffolder lowers this to .fbs and generates the
+// FlatBuffers codec via face_tss_codegen.py; raw detections stay scalar
+// to show both flavors coexisting in one component.
+module SensorMsgs {
+
+    enum Fix {
+        None,
+        Gps,
+        Rtk
+    };
+
+    struct GeoPoint {
+        double lat;
+        double lon;
+    };
+
+    struct FusedTrack {
+        long track_id;
+        GeoPoint pos;
+        Fix fix;
+        string label;
+        sequence<double> confidences;
+    };
+
+};

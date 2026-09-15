@@ -15,10 +15,10 @@ def test_parses_real_descriptor():
     assert doc["uop"]["name"] == "sensor_uop"
     assert doc["uop"]["language"] == "c99"
     assert [t["name"] for t in doc["uop"]["types"]] == [
-        "raw_detection", "fused_track"]
+        "raw_detection", "FusedTrack"]
     fused = doc["uop"]["types"][1]
-    assert [f["name"] for f in fused["fields"]] == ["x", "y", "track_id"]
-    assert [f["type"] for f in fused["fields"]] == ["int32"] * 3
+    assert fused["idl"] == "sensor.idl"
+    assert fused["idl_type"] == "SensorMsgs::FusedTrack"
     conns = doc["uop"]["connections"]
     assert [c["name"] for c in conns] == ["RAW_DETECTION", "FUSED_TRACK"]
     assert conns[0]["role"] == "subscriber"

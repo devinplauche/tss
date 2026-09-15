@@ -9,9 +9,10 @@ Generates a single self-contained header ``<uop>_types.h``:
 
 Wire format is packed little-endian, shift-based (no alignment or
 host-endianness hazards). This is the zero-dependency path for scalar-only
-models. Richer models (strings, nested tables, unions) are out of scope
-here: the designed seam is a future ``schema: foo.fbs`` key on the type
-that delegates to ``face_tss_codegen.py`` instead of this emitter.
+models. Richer models (strings, nested tables, unions) come from OMG IDL
+via an ``idl:`` key on the descriptor type: scaffold.idl_to_fbs lowers the
+IDL to .fbs and scaffold.idl_emit delegates to ``face_tss_codegen.py``,
+whose ``<stem>_typed.h`` is included here.
 """
 
 from .model import SCALAR_TYPES
@@ -110,10 +111,20 @@ def _decode_lines(field, idx):
 
 
 def emit_types_header(model):
-    """Render the ``<uop>_types.h`` header for a validated UopModel."""
+    """Render the ``<uop>_types.h`` header for a validated UopModel.
+
+    Scalar types get their packed little-endian codec inline (see module
+    docstring). IDL-defined types get an include of their generated
+    ``<stem>_typed.h`` (produced by scaffold.idl_emit via
+    face_tss_codegen.py): the C type is the IDL struct's own name.
+    """
     guard = f"{model.name.upper()}_TYPES_H"
     out = [_HEADER_PREAMBLE.format(guard=guard)]
     for t in model.types:
+        if t.is_idl:
+            out.append(f'#include "{t.typed_stem}.h"')
+            out.append("")
+            continue
         tname = f"{t.name}_t"
         macro = f"{t.name.upper()}_WIRE_SIZE"
         out.append(f"typedef struct {{")

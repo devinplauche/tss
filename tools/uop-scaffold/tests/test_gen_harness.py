@@ -90,7 +90,7 @@ def test_drive_region_preserved(model):
 
 def test_cmake_registers_ctest(model):
     cmake = emit_cmake_harness(model)
-    assert "add_executable(sensor_uop_harness sensor_uop_harness.c)" in cmake
+    assert "add_executable(sensor_uop_harness sensor_uop_harness.c fusedtrack_typed.c)" in cmake
     assert "enable_testing()" in cmake
     assert "add_test(NAME sensor_uop_loopback" in cmake
     assert "$<TARGET_FILE:sensor_uop>" in cmake
@@ -110,11 +110,17 @@ def test_harness_compiles_clean(tmp_path, model):
     files, _ = generate_tree(model, {}, {})
     write_tree(out, files)
     exe = tmp_path / "harness_bin"
+    typed_srcs = sorted(str(p) for p in out.glob("*_typed.c"))
+    flatcc_inc = f"{TSS_ROOT}/build/_deps/flatcc-src/include"
+    flatcc_lib = f"{TSS_ROOT}/build/_deps/flatcc-src/lib"
     r = subprocess.run(
         ["gcc", "-std=c99", "-Wall", "-Wextra", "-Werror",
-         "-I", f"{TSS_ROOT}/c/include", str(out / "sensor_uop_harness.c"),
+         "-I", f"{TSS_ROOT}/c/include", "-I", flatcc_inc,
+         str(out / "sensor_uop_harness.c")] + typed_srcs + [
          "-o", str(exe), f"-L{TSS_ROOT}/build", "-lTSS",
-         "-Wl,-rpath," + f"{TSS_ROOT}/build"],
+         f"-L{flatcc_lib}", "-lflatccrt",
+         "-Wl,-rpath," + f"{TSS_ROOT}/build",
+         "-Wl,-rpath," + flatcc_lib],
         capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, f"compile failed:\n{r.stderr}"
 

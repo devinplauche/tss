@@ -11,11 +11,24 @@ from pathlib import Path
 
 import pytest
 
+from scaffold.gen_uop import generate_tree
 from scaffold.model import load_descriptor
 from scaffold.types_emit import emit_types_header
 
 _HERE = Path(__file__).resolve().parent
 SENSOR = str(_HERE.parent / "examples" / "sensor" / "sensor_uop.yaml")
+
+
+def _find_tss_root():
+    d = _HERE
+    for _ in range(8):
+        if (d / "c" / "include" / "face_tss" / "tss.h").exists():
+            return d
+        d = d.parent
+    raise RuntimeError("could not locate the tss repo root")
+
+
+TSS_ROOT = _find_tss_root()
 
 
 @pytest.fixture(scope="module")
@@ -24,20 +37,28 @@ def header(tmp_path_factory):
     text = emit_types_header(model)
     assert "SENSOR_UOP_TYPES_H" in text
     assert "#define RAW_DETECTION_WIRE_SIZE 8" in text
-    assert "#define FUSED_TRACK_WIRE_SIZE 12" in text
+    # FusedTrack is IDL-defined now: no fixed wire size, the generated
+    # FlatBuffers codec header is included instead.
+    assert '#include "fusedtrack_typed.h"' in text
+    assert "FUSED_TRACK_WIRE_SIZE" not in text
     assert "typedef struct" in text
     d = tmp_path_factory.mktemp("gen")
-    h = d / "sensor_uop_types.h"
-    h.write_text(text)
-    return d, h
+    # The types header includes the IDL codec header; write every
+    # generated file so the include chain resolves. face_tss/typed.h
+    # comes from the TSS include dir (added to the compile below).
+    files, _ = generate_tree(model, {})
+    for name, content in files.items():
+        (d / name).write_text(content)
+    return d, d / "sensor_uop_types.h"
 
 
 C_PROG = textwrap.dedent("""\
     #include <stdio.h>
+    #include <string.h>
     #include "sensor_uop_types.h"
 
     int main(void) {
-        /* every scalar kind, boundary values */
+        /* scalar codec: boundary values round-trip */
         raw_detection_t det = { 10, -20 };
         uint8_t w[RAW_DETECTION_WIRE_SIZE];
         raw_detection_encode(&det, w);
@@ -45,27 +66,21 @@ C_PROG = textwrap.dedent("""\
             printf("%02x", w[i]);
         printf("\\n");
 
-        fused_track_t f = { 10, 20, 1 };
-        uint8_t w2[FUSED_TRACK_WIRE_SIZE];
-        fused_track_encode(&f, w2);
-        for (int i = 0; i < FUSED_TRACK_WIRE_SIZE; i++)
-            printf("%02x", w2[i]);
-        printf("\\n");
-
         /* decode round-trip, including a short buffer rejection */
-        fused_track_t back;
-        if (fused_track_decode(w2, sizeof(w2), &back) != 0) return 2;
-        if (back.x != 10 || back.y != 20 || back.track_id != 1) return 3;
-        if (fused_track_decode(w2, sizeof(w2) - 1, &back) != -1) return 4;
+        raw_detection_t back;
+        if (raw_detection_decode(w, sizeof(w), &back) != 0) return 2;
+        if (back.x != 10 || back.y != -20) return 3;
+        if (raw_detection_decode(w, sizeof(w) - 1, &back) != -1) return 4;
         {   /* over-long payloads are rejected too */
-            uint8_t w3[FUSED_TRACK_WIRE_SIZE + 1];
-            memcpy(w3, w2, sizeof(w2));
-            if (fused_track_decode(w3, sizeof(w3), &back) != -1) return 5;
+            uint8_t w2[RAW_DETECTION_WIRE_SIZE + 1];
+            memcpy(w2, w, sizeof(w));
+            if (raw_detection_decode(w2, sizeof(w2), &back) != -1) return 5;
         }
 
-        /* int64/double/bool extremes via a second header is overkill here;
-           spot-check extremes through fused_track fields is enough for the
-           MVP emitter; full scalar coverage lives in test_all_scalars. */
+        /* IDL codec: the FusedTrack type is visible through the include
+           chain (sizeof needs the complete type, no link needed) */
+        printf("%zu\\n", sizeof(FusedTrack));
+
         printf("OK\\n");
         return 0;
     }
@@ -78,7 +93,9 @@ def _build_and_run(tmp_path, header_dir, prog_src, prog_name="tprog"):
     exe = tmp_path / prog_name
     r = subprocess.run(
         ["gcc", "-std=c99", "-Wall", "-Wextra", "-Werror",
-         "-I", str(header_dir), str(src), "-o", str(exe)],
+         "-I", str(header_dir),
+         "-I", str(TSS_ROOT / "c" / "include"),
+         str(src), "-o", str(exe)],
         capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, f"compile failed:\n{r.stderr}"
     r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
@@ -92,8 +109,8 @@ def test_wire_bytes_and_round_trip(tmp_path, header):
     lines = r.stdout.splitlines()
     # raw_detection{10, -20} LE: 0a000000 ecffffff
     assert lines[0] == "0a000000ecffffff"
-    # fused_track{10, 20, 1} LE
-    assert lines[1] == "0a0000001400000001000000"
+    # FusedTrack struct is visible (complete type through the include)
+    assert int(lines[1]) > 0
     assert lines[2] == "OK"
 
 

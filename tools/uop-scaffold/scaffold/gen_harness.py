@@ -45,28 +45,122 @@ CTEST_BASE_PORT = 48601
 
 
 def default_regions(model):
-    sends = [f"send_{c.name}" for c in model.connections
-             if c.role == "subscriber"]
-    recvs = [f"recv_{c.name}" for c in model.connections
-             if c.role == "publisher"]
+    h_pubs = [c for c in model.connections if c.role == "subscriber"]
+    h_subs = [c for c in model.connections if c.role == "publisher"]
     todo = ["/* TODO: drive the UoP under test.",
             " *",
             " * Stimulus + verification are application-specific, so this",
             " * region is yours to write. It survives regeneration.",
             " *"]
-    if sends:
+    if h_pubs:
         todo.append(" * Send inputs with:")
-        todo.extend(f" *   rc = {s}(tss, {s[5:].lower()}_id, &in);"
-                    for s in sends)
-    if recvs:
+        for c in h_pubs:
+            todo.append(f" *   rc = send_{c.name}(tss, {c.name.lower()}_id,"
+                        " &in);")
+    if h_subs:
         todo.append(" * Receive replies with:")
-        todo.extend(f" *   rc = {r}(tss, {r[5:].lower()}_id, &out);"
-                    for r in recvs)
+        for c in h_subs:
+            t = model.type_by_name(c.type)
+            todo.append(f" *   rc = recv_{c.name}(tss, {c.name.lower()}_id,"
+                        " &out);")
+            if t.is_idl:
+                todo.append(f" *   ... then {t.name}_fini(&out) when done"
+                            " with it (it owns heap memory).")
     todo.append(" * Check every expectation with CHECK(cond, fmt, ...).")
     todo.append(" */")
     todo.append('printf("FAIL: drive region not implemented\\n");')
     todo.append("failures++;")
     return {"drive": "\n".join(todo) + "\n"}
+
+
+def _emit_send_scalar(L, c, t):
+    L.append(f"FACE_TSS_RETURN_CODE send_{c.name}(FACE_TSS *tss,")
+    L.append(f"        FACE_TSS_CONNECTION_ID_TYPE conn, const {t.name}_t *msg)")
+    L.append("{")
+    L.append(f"    uint8_t wire[{t.name.upper()}_WIRE_SIZE];")
+    L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn ="
+             " FACE_TSS_TRANSACTION_ID_UNSPECIFIED;")
+    L.append("")
+    L.append(f"    {t.name}_encode(msg, wire);")
+    L.append("    return face_tss_send_message(tss, conn, IO_TIMEOUT_NS, &txn,")
+    L.append("                                 wire, sizeof(wire));")
+    L.append("}")
+
+
+def _emit_send_idl(L, c, t):
+    """Harness send helper for IDL-defined types.
+
+    Serializes with the generated codec (caller-owned heap buffer), sends
+    the payload, then frees it.
+    """
+    L.append(f"FACE_TSS_RETURN_CODE send_{c.name}(FACE_TSS *tss,")
+    L.append(f"        FACE_TSS_CONNECTION_ID_TYPE conn, const {t.name} *msg)")
+    L.append("{")
+    L.append("    uint8_t *payload = NULL;")
+    L.append("    size_t payload_len = 0;")
+    L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn ="
+             " FACE_TSS_TRANSACTION_ID_UNSPECIFIED;")
+    L.append("    FACE_TSS_RETURN_CODE rc;")
+    L.append("")
+    L.append(f"    rc = {t.name}_serialize(msg, &payload, &payload_len);")
+    L.append("    if (rc != FACE_TSS_RC_NO_ERROR) {")
+    L.append("        return rc;")
+    L.append("    }")
+    L.append("    rc = face_tss_send_message(tss, conn, IO_TIMEOUT_NS, &txn,")
+    L.append("                               payload, payload_len);")
+    L.append("    free(payload);")
+    L.append("    return rc;")
+    L.append("}")
+
+
+def _emit_recv_scalar(L, c, t):
+    L.append(f"FACE_TSS_RETURN_CODE recv_{c.name}(FACE_TSS *tss,")
+    L.append(f"        FACE_TSS_CONNECTION_ID_TYPE conn, {t.name}_t *msg)")
+    L.append("{")
+    L.append("    FACE_TSS_MESSAGE m;")
+    L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn = 0;")
+    L.append("    FACE_TSS_RETURN_CODE rc;")
+    L.append("")
+    L.append("    memset(&m, 0, sizeof(m));")
+    L.append("    rc = face_tss_receive_message(tss, conn, IO_TIMEOUT_NS, 0,")
+    L.append("                                  &txn, &m, NULL);")
+    L.append("    if (rc != FACE_TSS_RC_NO_ERROR) {")
+    L.append("        return rc;")
+    L.append("    }")
+    L.append(f"    rc = {t.name}_decode(m.payload, m.payload_len, msg)")
+    L.append("        != 0 ? FACE_TSS_RC_INVALID_PARAM : FACE_TSS_RC_NO_ERROR;")
+    L.append("    face_tss_message_fini(&m);")
+    L.append("    return rc;")
+    L.append("}")
+
+
+def _emit_recv_idl(L, c, t):
+    """Harness recv helper for IDL-defined types.
+
+    On success the caller owns ``*msg`` and must release it with
+    ``<T>_fini``; on deserialize failure the partial struct is released
+    here (the codec zeroes it first, so fini is safe).
+    """
+    L.append(f"FACE_TSS_RETURN_CODE recv_{c.name}(FACE_TSS *tss,")
+    L.append(f"        FACE_TSS_CONNECTION_ID_TYPE conn, {t.name} *msg)")
+    L.append("{")
+    L.append("    FACE_TSS_MESSAGE m;")
+    L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn = 0;")
+    L.append("    FACE_TSS_RETURN_CODE rc;")
+    L.append("")
+    L.append("    memset(&m, 0, sizeof(m));")
+    L.append("    rc = face_tss_receive_message(tss, conn, IO_TIMEOUT_NS, 0,")
+    L.append("                                  &txn, &m, NULL);")
+    L.append("    if (rc != FACE_TSS_RC_NO_ERROR) {")
+    L.append("        return rc;")
+    L.append("    }")
+    L.append(f"    rc = {t.name}_deserialize(m.payload, m.payload_len, msg);")
+    L.append("    face_tss_message_fini(&m);")
+    L.append("    if (rc != FACE_TSS_RC_NO_ERROR) {")
+    L.append(f"        {t.name}_fini(msg);")
+    L.append("    }")
+    L.append("    return rc;")
+    L.append("}")
 
 
 def emit_harness_c(model, regions):
@@ -143,38 +237,17 @@ def emit_harness_c(model, regions):
         L.append("/* ------------------------------------------------------------------ */")
     for c in h_pubs:
         t = model.type_by_name(c.type)
-        L.append(f"FACE_TSS_RETURN_CODE send_{c.name}(FACE_TSS *tss,")
-        L.append(f"        FACE_TSS_CONNECTION_ID_TYPE conn, const {t.name}_t *msg)")
-        L.append("{")
-        L.append(f"    uint8_t wire[{t.name.upper()}_WIRE_SIZE];")
-        L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn ="
-                 " FACE_TSS_TRANSACTION_ID_UNSPECIFIED;")
-        L.append("")
-        L.append(f"    {t.name}_encode(msg, wire);")
-        L.append("    return face_tss_send_message(tss, conn, IO_TIMEOUT_NS, &txn,")
-        L.append("                                 wire, sizeof(wire));")
-        L.append("}")
+        if t.is_idl:
+            _emit_send_idl(L, c, t)
+        else:
+            _emit_send_scalar(L, c, t)
         L.append("")
     for c in h_subs:
         t = model.type_by_name(c.type)
-        L.append(f"FACE_TSS_RETURN_CODE recv_{c.name}(FACE_TSS *tss,")
-        L.append(f"        FACE_TSS_CONNECTION_ID_TYPE conn, {t.name}_t *msg)")
-        L.append("{")
-        L.append("    FACE_TSS_MESSAGE m;")
-        L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn = 0;")
-        L.append("    FACE_TSS_RETURN_CODE rc;")
-        L.append("")
-        L.append("    memset(&m, 0, sizeof(m));")
-        L.append("    rc = face_tss_receive_message(tss, conn, IO_TIMEOUT_NS, 0,")
-        L.append("                                  &txn, &m, NULL);")
-        L.append("    if (rc != FACE_TSS_RC_NO_ERROR) {")
-        L.append("        return rc;")
-        L.append("    }")
-        L.append(f"    rc = {t.name}_decode(m.payload, m.payload_len, msg)")
-        L.append("        != 0 ? FACE_TSS_RC_INVALID_PARAM : FACE_TSS_RC_NO_ERROR;")
-        L.append("    face_tss_message_fini(&m);")
-        L.append("    return rc;")
-        L.append("}")
+        if t.is_idl:
+            _emit_recv_idl(L, c, t)
+        else:
+            _emit_recv_scalar(L, c, t)
         L.append("")
 
     # main ---------------------------------------------------------------
@@ -277,15 +350,31 @@ def emit_harness_c(model, regions):
 
 
 def emit_cmake_harness(model):
-    """CMake snippet: harness target + CTest loopback registration."""
+    """CMake snippet: harness target + CTest loopback registration.
+
+    Mirrors the UoP target's sources: IDL-defined types add their
+    generated codec and the flatcc runtime.
+    """
     uop = model.name
     harness = f"{uop}_harness"
+    idl_types = [t for t in model.types if t.is_idl]
+    sources = " ".join([f"{harness}.c"] +
+                       [f"{t.typed_stem}.c" for t in idl_types])
+    flatcc = ""
+    if idl_types:
+        flatcc = (
+            f'target_include_directories({harness} PRIVATE\n'
+            '  "${TSS_ROOT}/build/_deps/flatcc-src/include")\n'
+            f'target_link_directories({harness} PRIVATE\n'
+            '  "${TSS_ROOT}/build/_deps/flatcc-src/lib")\n'
+            f'target_link_libraries({harness} PRIVATE flatccrt)\n'
+        )
     return f"""\
-add_executable({harness} {harness}.c)
+add_executable({harness} {sources})
 target_include_directories({harness} PRIVATE "${{TSS_ROOT}}/c/include")
 target_link_directories({harness} PRIVATE "${{TSS_ROOT}}/build")
 target_link_libraries({harness} PRIVATE TSS)
-
+{flatcc}
 enable_testing()
 add_test(NAME {uop}_loopback
          COMMAND {harness} $<TARGET_FILE:{uop}> {CTEST_BASE_PORT})

@@ -116,6 +116,120 @@ def _callback_sig():
             "                             FACE_TSS_RETURN_CODE *return_code)")
 
 
+def _emit_publish_scalar(L, ctx_t, c, t, stem):
+    """Publish helper for scalar (fixed-size, infallible-encode) types."""
+    L.append(f"int publish_{c.name}({ctx_t} *ctx, const {t.name}_t *msg)")
+    L.append("{")
+    L.append(f"    uint8_t wire[{t.name.upper()}_WIRE_SIZE];")
+    L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn ="
+             " FACE_TSS_TRANSACTION_ID_UNSPECIFIED;")
+    L.append("")
+    L.append(f"    {t.name}_encode(msg, wire);")
+    L.append(f"    if (face_tss_send_message(ctx->tss, ctx->{stem}_id,")
+    L.append("                              SEND_TIMEOUT_NS, &txn, wire,")
+    L.append("                              sizeof(wire))")
+    L.append("        != FACE_TSS_RC_NO_ERROR) {")
+    L.append("        ctx->errors++;")
+    L.append("        return -1;")
+    L.append("    }")
+    L.append("    ctx->published++;")
+    L.append("    return 0;")
+    L.append("}")
+    L.append("")
+
+
+def _emit_publish_idl(L, ctx_t, c, t, stem):
+    """Publish helper for IDL-defined types.
+
+    The codec serializes to a caller-owned heap buffer (FlatBuffers wire
+    format); the helper sends it and frees it. Serialization can fail
+    (allocation), unlike the scalar path.
+    """
+    L.append(f"int publish_{c.name}({ctx_t} *ctx, const {t.name} *msg)")
+    L.append("{")
+    L.append("    uint8_t *payload = NULL;")
+    L.append("    size_t payload_len = 0;")
+    L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn ="
+             " FACE_TSS_TRANSACTION_ID_UNSPECIFIED;")
+    L.append("    FACE_TSS_RETURN_CODE rc;")
+    L.append("")
+    L.append(f"    rc = {t.name}_serialize(msg, &payload, &payload_len);")
+    L.append("    if (rc != FACE_TSS_RC_NO_ERROR) {")
+    L.append("        ctx->errors++;")
+    L.append("        return -1;")
+    L.append("    }")
+    L.append(f"    rc = face_tss_send_message(ctx->tss, ctx->{stem}_id,")
+    L.append("                               SEND_TIMEOUT_NS, &txn, payload,")
+    L.append("                               payload_len);")
+    L.append("    free(payload);")
+    L.append("    if (rc != FACE_TSS_RC_NO_ERROR) {")
+    L.append("        ctx->errors++;")
+    L.append("        return -1;")
+    L.append("    }")
+    L.append("    ctx->published++;")
+    L.append("    return 0;")
+    L.append("}")
+    L.append("")
+
+
+def _emit_callback_scalar(L, ctx_t, c, t, region):
+    L.append(f"static void {c.callback}{_callback_sig()}")
+    L.append("{")
+    L.append(f"    {ctx_t} *ctx = ({ctx_t} *)user;")
+    L.append(f"    {t.name}_t msg;")
+    L.append("")
+    L.append("    (void)connection_id;")
+    L.append("    (void)transaction_id;")
+    L.append("    (void)message_guid;")
+    L.append("    (void)header;")
+    L.append("    (void)qos;")
+    L.append("")
+    L.append("    *return_code = FACE_TSS_RC_NO_ERROR;")
+    L.append(f"    if ({t.name}_decode(payload, payload_len, &msg) != 0) {{")
+    L.append("        ctx->errors++;")
+    L.append("        return;")
+    L.append("    }")
+    L.append("    ctx->received++;")
+    L.append("")
+    L.append(region(c.callback))
+    L.append("}")
+    L.append("")
+
+
+def _emit_callback_idl(L, ctx_t, c, t, region):
+    """Subscription callback for IDL-defined types.
+
+    Deserializes into a heap-owning struct, runs USER CODE, then releases
+    with ``<T>_fini``. The fini call is generated after the region, so
+    USER CODE must not ``return`` early from the region.
+    """
+    L.append(f"static void {c.callback}{_callback_sig()}")
+    L.append("{")
+    L.append(f"    {ctx_t} *ctx = ({ctx_t} *)user;")
+    L.append(f"    {t.name} msg;")
+    L.append("")
+    L.append("    (void)connection_id;")
+    L.append("    (void)transaction_id;")
+    L.append("    (void)message_guid;")
+    L.append("    (void)header;")
+    L.append("    (void)qos;")
+    L.append("")
+    L.append("    *return_code = FACE_TSS_RC_NO_ERROR;")
+    L.append(f"    if ({t.name}_deserialize(payload, payload_len, &msg)")
+    L.append("        != FACE_TSS_RC_NO_ERROR) {")
+    L.append("        ctx->errors++;")
+    L.append("        return;")
+    L.append("    }")
+    L.append("    ctx->received++;")
+    L.append("")
+    L.append(f"    /* NOTE: {t.name}_fini(&msg) runs after your code below;")
+    L.append("       do not 'return' early from the USER CODE region. */")
+    L.append(region(c.callback))
+    L.append(f"    {t.name}_fini(&msg);")
+    L.append("}")
+    L.append("")
+
+
 def emit_uop_c(model, regions):
     """Render ``<uop>.c``. ``regions`` maps region name -> body text."""
     uop = model.name
@@ -151,6 +265,7 @@ def emit_uop_c(model, regions):
     L.append("#include <signal.h>")
     L.append("#include <stdint.h>")
     L.append("#include <stdio.h>")
+    L.append("#include <stdlib.h> /* free() for IDL-typed payloads */")
     L.append("#include <string.h>")
     L.append("#include <unistd.h>")
     L.append("")
@@ -189,24 +304,10 @@ def emit_uop_c(model, regions):
         for c in pubs:
             t = model.type_by_name(c.type)
             stem = members[c.name]
-            L.append(f"int publish_{c.name}({ctx_t} *ctx, const {t.name}_t *msg)")
-            L.append("{")
-            L.append(f"    uint8_t wire[{t.name.upper()}_WIRE_SIZE];")
-            L.append("    FACE_TSS_TRANSACTION_ID_TYPE txn ="
-                     " FACE_TSS_TRANSACTION_ID_UNSPECIFIED;")
-            L.append("")
-            L.append(f"    {t.name}_encode(msg, wire);")
-            L.append(f"    if (face_tss_send_message(ctx->tss, ctx->{stem}_id,")
-            L.append("                              SEND_TIMEOUT_NS, &txn, wire,")
-            L.append("                              sizeof(wire))")
-            L.append("        != FACE_TSS_RC_NO_ERROR) {")
-            L.append("        ctx->errors++;")
-            L.append("        return -1;")
-            L.append("    }")
-            L.append("    ctx->published++;")
-            L.append("    return 0;")
-            L.append("}")
-            L.append("")
+            if t.is_idl:
+                _emit_publish_idl(L, ctx_t, c, t, stem)
+            else:
+                _emit_publish_scalar(L, ctx_t, c, t, stem)
 
     # Subscription callbacks -------------------------------------------
     if subs:
@@ -215,27 +316,10 @@ def emit_uop_c(model, regions):
         L.append("/* ------------------------------------------------------------------ */")
         for c in subs:
             t = model.type_by_name(c.type)
-            L.append(f"static void {c.callback}{_callback_sig()}")
-            L.append("{")
-            L.append(f"    {ctx_t} *ctx = ({ctx_t} *)user;")
-            L.append(f"    {t.name}_t msg;")
-            L.append("")
-            L.append("    (void)connection_id;")
-            L.append("    (void)transaction_id;")
-            L.append("    (void)message_guid;")
-            L.append("    (void)header;")
-            L.append("    (void)qos;")
-            L.append("")
-            L.append("    *return_code = FACE_TSS_RC_NO_ERROR;")
-            L.append(f"    if ({t.name}_decode(payload, payload_len, &msg) != 0) {{")
-            L.append("        ctx->errors++;")
-            L.append("        return;")
-            L.append("    }")
-            L.append("    ctx->received++;")
-            L.append("")
-            L.append(region(c.callback))
-            L.append("}")
-            L.append("")
+            if t.is_idl:
+                _emit_callback_idl(L, ctx_t, c, t, region)
+            else:
+                _emit_callback_scalar(L, ctx_t, c, t, region)
 
     # Lifecycle --------------------------------------------------------
     L.append("/* ------------------------------------------------------------------ */")
@@ -382,8 +466,25 @@ def emit_uop_c(model, regions):
 
 
 def emit_cmakelists(model):
-    """Render CMakeLists.txt for the generated tree."""
+    """Render CMakeLists.txt for the generated tree.
+
+    IDL-defined types add their generated ``<stem>_typed.c`` codec plus
+    the flatcc runtime headers/library (vendored under the tss build
+    tree); scalar-only projects need nothing beyond TSS.
+    """
     uop = model.name
+    idl_types = [t for t in model.types if t.is_idl]
+    sources = " ".join([f"{uop}.c"] + [f"{t.typed_stem}.c" for t in idl_types])
+    flatcc = ""
+    if idl_types:
+        flatcc = (
+            "\n# IDL-defined message types use the flatcc runtime.\n"
+            f'target_include_directories({uop} PRIVATE\n'
+            '  "${TSS_ROOT}/build/_deps/flatcc-src/include")\n'
+            f'target_link_directories({uop} PRIVATE\n'
+            '  "${TSS_ROOT}/build/_deps/flatcc-src/lib")\n'
+            f'target_link_libraries({uop} PRIVATE flatccrt)\n'
+        )
     return f"""\
 # Generated by uop-scaffold. Regenerate; do not edit by hand.
 #
@@ -409,11 +510,11 @@ set(CMAKE_BUILD_RPATH
     "${{TSS_ROOT}}/build/_deps/nng-build"
     "${{TSS_ROOT}}/build/_deps/flatcc-src/lib")
 
-add_executable({uop} {uop}.c)
+add_executable({uop} {sources})
 target_include_directories({uop} PRIVATE "${{TSS_ROOT}}/c/include")
 target_link_directories({uop} PRIVATE "${{TSS_ROOT}}/build")
 target_link_libraries({uop} PRIVATE TSS)
-"""
+{flatcc}"""
 
 
 def generate_tree(model, regions=None, harness_regions=None):
@@ -424,16 +525,25 @@ def generate_tree(model, regions=None, harness_regions=None):
     ``<uop>_harness.c``) are preserved; anything not consumed becomes an
     orphan warning.
     """
+    from .idl_emit import idl_type_files
+
     regions = dict(regions or {})
     harness_regions = dict(harness_regions or {})
     uop_c, orphans = emit_uop_c(model, regions)
     harness_c, h_orphans = emit_harness_c(model, harness_regions)
-    return {
+    files = {
         f"{model.name}.c": uop_c,
         f"{model.name}_harness.c": harness_c,
         f"{model.name}_types.h": emit_types_header(model),
         "CMakeLists.txt": emit_cmakelists(model) + "\n" + emit_cmake_harness(model),
-    }, orphans + h_orphans
+    }
+    for t in model.types:
+        if t.is_idl:
+            for fname, content in idl_type_files(t).items():
+                if fname in files:  # pragma: no cover - defensive
+                    raise RegionError(f"generated file name clash: {fname}")
+                files[fname] = content
+    return files, orphans + h_orphans
 
 
 def write_tree(out_dir, files):
@@ -471,7 +581,7 @@ def main(argv=None):
 
     try:
         files, orphans = generate_tree(model, regions, harness_regions)
-    except ValueError as e:
+    except (ValueError, DescriptorError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     write_tree(out, files)

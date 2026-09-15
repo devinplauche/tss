@@ -78,7 +78,7 @@ def test_generated_c_shape(model):
     assert "static void on_raw_detection" in src
     assert "int publish_FUSED_TRACK" in src
     assert "raw_detection_decode(payload, payload_len, &msg)" in src
-    assert "fused_track_encode(msg, wire)" in src
+    assert "FusedTrack_serialize(msg, &payload, &payload_len)" in src
     # USER CODE regions with defaults
     assert "/* USER CODE BEGIN: ctx_fields */" in src
     assert "/* USER CODE BEGIN: on_raw_detection */" in src
@@ -116,7 +116,7 @@ def test_orphan_regions_reported(model):
 def test_cmakelists(model):
     cmake = emit_cmakelists(model)
     assert "project(sensor_uop C)" in cmake
-    assert "add_executable(sensor_uop sensor_uop.c)" in cmake
+    assert "add_executable(sensor_uop sensor_uop.c fusedtrack_typed.c)" in cmake
     assert "-Werror" in cmake
 
 
@@ -138,10 +138,18 @@ def test_cli_rejects_bad_descriptor(tmp_path):
 
 def _compile(tmp_path, src_file, extra=None):
     exe = tmp_path / "uop_bin"
+    gen_dir = src_file.parent
+    # IDL types produce a FlatBuffers codec per type; link them in.
+    typed_srcs = sorted(str(p) for p in gen_dir.glob("*_typed.c"))
+    flatcc_inc = f"{TSS_ROOT}/build/_deps/flatcc-src/include"
+    flatcc_lib = f"{TSS_ROOT}/build/_deps/flatcc-src/lib"
     cmd = ["gcc", "-std=c99", "-Wall", "-Wextra", "-Werror",
-           "-I", f"{TSS_ROOT}/c/include", str(src_file), "-o", str(exe),
+           "-I", f"{TSS_ROOT}/c/include", "-I", flatcc_inc,
+           str(src_file)] + typed_srcs + ["-o", str(exe),
            f"-L{TSS_ROOT}/build", "-lTSS",
-           "-Wl,-rpath," + f"{TSS_ROOT}/build"]
+           f"-L{flatcc_lib}", "-lflatccrt",
+           "-Wl,-rpath," + f"{TSS_ROOT}/build",
+           "-Wl,-rpath," + flatcc_lib]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, f"compile failed:\n{r.stderr}"
     return exe

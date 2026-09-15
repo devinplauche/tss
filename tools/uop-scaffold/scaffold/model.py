@@ -30,8 +30,9 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # MVP scalar language: fixed-width integers, bool, IEEE-754 floats.
 # Wire format is always little-endian (see types_emit).
-# Future: delegate richer models (.fbs with strings/tables/unions) to
-# face_tss_codegen.py via a ``schema:`` key on the type.
+# Richer models come from OMG IDL via an ``idl:`` key on the type, which
+# lowers to .fbs and delegates to face_tss_codegen.py (see idl_parse,
+# idl_to_fbs, idl_emit).
 SCALAR_TYPES = {
     "int8": ("int8_t", 1),
     "uint8": ("uint8_t", 1),
@@ -73,11 +74,30 @@ class FieldDef:
 @dataclass(frozen=True)
 class TypeDef:
     name: str
-    fields: tuple
+    fields: tuple = ()  # scalar flavor only
+    # kind is "scalar" (packed little-endian codec, zero-dep) or "idl"
+    # (OMG IDL-defined type, FlatBuffers wire format via face_tss_codegen).
+    kind: str = "scalar"
+    # IDL flavor only: absolute path of the .idl file and the qualified
+    # IDL name, e.g. "Sensor::FusedTrack". The C type name is the
+    # descriptor's ``name`` (validated equal to the IDL struct's name).
+    idl_path: str = ""
+    idl_qname: str = ""
 
     @property
     def wire_size(self):
+        if self.kind != "scalar":  # pragma: no cover - misuse, not input
+            raise AttributeError("IDL types have no fixed wire size")
         return sum(f.wire_size for f in self.fields)
+
+    @property
+    def is_idl(self):
+        return self.kind == "idl"
+
+    @property
+    def typed_stem(self):
+        """File stem of the generated codec: '<name>_typed' (lowercased)."""
+        return f"{self.name.lower()}_typed"
 
 
 @dataclass(frozen=True)
@@ -125,11 +145,42 @@ def _check_allowed(value, allowed, ctx):
     return value
 
 
-def _load_types(raw, ctx):
+def _load_idl_type(entry, ectx, desc_dir):
+    """Load a type defined by an OMG IDL file (``idl:`` key)."""
+    from . import idl_parse, idl_to_fbs
+
+    name = _ident(entry["name"], f"{ectx}.name")
+    if "fields" in entry:
+        raise DescriptorError(
+            f"{ectx}: 'idl' types do not take 'fields' (the IDL defines them)")
+    rel = entry["idl"]
+    if not isinstance(rel, str) or not rel:
+        raise DescriptorError(f"{ectx}: 'idl' must be a file path string")
+    idl_path = desc_dir / rel
+    if not idl_path.is_file():
+        raise DescriptorError(f"{ectx}: idl file not found: {rel}")
+    idl_type = entry.get("idl_type")
+    if idl_type is not None and not isinstance(idl_type, str):
+        raise DescriptorError(f"{ectx}: 'idl_type' must be a string")
+    try:
+        defs = idl_parse.parse_idl(idl_path)
+        qn = idl_to_fbs.find_type(defs, name, idl_type, str(idl_path))
+        # Validate the lowering now so descriptor errors surface here,
+        # not halfway through code generation.
+        idl_to_fbs.lower_to_fbs(defs, qn, str(idl_path))
+        c_names = idl_to_fbs.all_c_names(defs, str(idl_path))
+    except idl_parse.IdlError as e:
+        raise DescriptorError(f"{ectx}: {e}") from e
+    return TypeDef(name=name, kind="idl", idl_path=str(idl_path),
+                   idl_qname="::".join(qn)), c_names
+
+
+def _load_types(raw, ctx, desc_dir):
     if not isinstance(raw, list) or not raw:
         raise DescriptorError(f"{ctx}: 'types' must be a non-empty list")
     types = []
     seen = set()
+    pending_idl = []  # (ectx, TypeDef, c_names) for cross-checks below
     for i, entry in enumerate(raw):
         ectx = f"{ctx}.types[{i}]"
         if not isinstance(entry, dict):
@@ -138,6 +189,11 @@ def _load_types(raw, ctx):
         if name in seen:
             raise DescriptorError(f"{ectx}: duplicate type '{name}'")
         seen.add(name)
+        if "idl" in entry:
+            tdef, c_names = _load_idl_type(entry, ectx, desc_dir)
+            pending_idl.append((ectx, tdef, c_names))
+            types.append(tdef)
+            continue
         fraw = _req(entry, "fields", ectx)
         if not isinstance(fraw, list) or not fraw:
             raise DescriptorError(f"{ectx}: 'fields' must be a non-empty list")
@@ -155,6 +211,30 @@ def _load_types(raw, ctx):
                                    f"{fctx}.type")
             fields.append(FieldDef(fname, ftype))
         types.append(TypeDef(name, tuple(fields)))
+    # Cross-flavor C-name checks. The combined <uop>_types.h includes every
+    # generated codec header, so any two definitions of 'struct Foo' would
+    # not compile. Each IDL type lowers its file with itself as root, so
+    # the MVP allows one message type per IDL file.
+    by_cname = {}
+    for t in types:
+        if t.kind == "scalar":
+            by_cname[t.name] = f"scalar type '{t.name}'"
+    seen_idl_paths = {}
+    for ectx, tdef, c_names in pending_idl:
+        if tdef.idl_path in seen_idl_paths:
+            raise DescriptorError(
+                f"{ectx}: IDL file '{tdef.idl_path}' already provides type "
+                f"'{seen_idl_paths[tdef.idl_path]}': one message type per "
+                f"IDL file in this MVP")
+        seen_idl_paths[tdef.idl_path] = tdef.name
+        for cn in sorted(c_names - {tdef.name}):
+            if cn in by_cname:
+                raise DescriptorError(
+                    f"{ectx}: IDL C name '{cn}' from '{tdef.idl_path}' "
+                    f"collides with {by_cname[cn]}: the generated headers "
+                    f"would redefine it")
+        for cn in c_names:
+            by_cname[cn] = f"IDL file '{tdef.idl_path}'"
     return tuple(types)
 
 
@@ -219,7 +299,7 @@ def load_descriptor(path):
                                f"{ctx}.language")
     profile = _check_allowed(_req(uop, "profile", ctx), PROFILES,
                              f"{ctx}.profile")
-    types = _load_types(_req(uop, "types", ctx), ctx)
+    types = _load_types(_req(uop, "types", ctx), ctx, path.parent)
     conns = _load_connections(_req(uop, "connections", ctx),
                               {t.name for t in types}, ctx)
     return UopModel(name, language, profile, types, conns)

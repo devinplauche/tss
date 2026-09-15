@@ -35,8 +35,13 @@ uop:
   types:                      # scalar message types (structs of scalars)
     - name: raw_detection
       fields:
-        - { name: x, type: int32 }
-        - { name: y, type: int32 }
+        - name: x
+          type: int32
+        - name: y
+          type: int32
+    - name: FusedTrack        # IDL-defined message type (see below)
+      idl: sensor.idl
+      idl_type: SensorMsgs::FusedTrack   # optional; required if ambiguous
   connections:                # one TSS connection each
     - name: RAW_DETECTION
       type: raw_detection
@@ -51,18 +56,50 @@ Rules, enforced with line-numbered errors:
   case-insensitively (they become lowercase C symbols).
 - `role: subscriber` requires `direction: destination` and a `callback`;
   `role: publisher` requires `direction: source` and forbids `callback`.
-- Field types are scalars: `int8/16/32/64`, `uint8/16/32/64`, `float`,
+- Scalar field types: `int8/16/32/64`, `uint8/16/32/64`, `float`,
   `double`, `bool`. Every connection's `type` must name a type in
   `types:`.
 - The parser accepts a deliberately small YAML subset (mappings, lists,
   bare/integer/quoted scalars, comments). Tabs, flow `{...}`/`[...]`
   syntax, anchors, and duplicate keys are rejected.
 
-Scalar-only types stay dependency-free on purpose: the codecs are
-shift-based little-endian encode/decode with exact-length checks, no
-FlatBuffers runtime. A future `schema:` key on a type is the designed
-seam for delegating richer types (strings, nested tables, unions) to
-`tools/face_tss_codegen.py`.
+## IDL-defined types
+
+A type can come from OMG IDL instead of inline scalar fields:
+
+```yaml
+    - name: FusedTrack
+      idl: sensor.idl              # path relative to the descriptor
+      idl_type: SensorMsgs::FusedTrack   # optional qualifier
+```
+
+The scaffolder parses a restricted IDL subset (modules, structs, enums,
+unions, typedefs, sequences, constants, `#include`), lowers it to a
+FlatBuffers schema, and reuses `tools/face_tss_codegen.py` for the C
+codec (`FusedTrack_serialize` / `FusedTrack_deserialize` /
+`FusedTrack_fini`). Scalar and IDL types coexist freely in one
+descriptor; the generated CMake links the FlatBuffers runtime only when
+an IDL type is present.
+
+MVP limitations, all rejected loudly at load time (never silently
+dropped):
+
+- Bounded `string<N>`, bounded `sequence<T,N>`, and fixed `typedef T[N]`
+  arrays are rejected (bounds enforcement is future work).
+- IDL `union` members must be structs, `string`, or integral scalars.
+  `boolean`/`float`/`double` members are rejected (their lowered names
+  would not compile as C field names), as are enum and sequence members.
+- One message type per IDL file (each file's codec is generated
+  independently).
+- IDL type names must not collide with scalar type names or with C
+  keywords.
+
+Ownership: strings, nested structs, and vectors in an IDL message are
+heap-owned. Allocate them with `malloc`/`strdup` (never point them at
+stack memory) and release with `<T>_fini` when done. The generated
+publish path serializes, sends, and frees; the callback path
+deserializes, runs your USER CODE, then finalizes — do not return early
+from a subscriber callback before cleanup.
 
 ## USER CODE regions
 
@@ -138,10 +175,13 @@ false PASS. CMake registers it as `ctest` test `<uop>_loopback`.
 - `scaffold/ysubset.py` — restricted YAML-subset parser.
 - `scaffold/model.py` — descriptor model + validation.
 - `scaffold/types_emit.py` — C99 scalar codecs.
+- `scaffold/idl_parse.py` — OMG IDL subset parser.
+- `scaffold/idl_to_fbs.py` — IDL AST to FlatBuffers schema lowering.
+- `scaffold/idl_emit.py` — IDL codec generation via face_tss_codegen.py.
 - `scaffold/gen_uop.py` — UoP + CMake generator (`generate_tree()`).
 - `scaffold/gen_harness.py` — harness + CTest generator.
 - `scaffold/util.py` — shared region helpers.
-- `tests/` — pytest suite (41 tests).
+- `tests/` — pytest suite (104 tests).
 - `examples/sensor/` — the worked demo (`demo.sh`).
 
 ## Trademark note
