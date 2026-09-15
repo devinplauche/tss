@@ -244,8 +244,16 @@ Xvfb, so File → Projects → Import could not be reached to load the
   `CONFIGURATION_RESOURCE` — use `face_tss_set_reference` +
   `face_tss_initialize_from_resource` (C) or `set_reference` +
   `initialize_from_resource` (Python) for the FACE shape. The full
-  FACE::Configuration service API (containers/sets) is not implemented;
-  JSON remains the built-in resource adapter.
+  FACE::Configuration service API (containers/sets) is implemented in
+  `face_tss/config_service.h` + `config_service.c` (C) and
+  `face_tss/config_service.py` (Python): `Initialize`, `Open`
+  (int64 session handle), `Get_Size`, `Read`, `Seek`
+  (`SEEK_FROM_START`/`CURRENT`/`END`), `Close`, with `INVALID_CONFIG` /
+  `INVALID_PARAM` / `NOT_AVAILABLE` per the IDL. Two built-in backends:
+  `memory:<name>` (in-memory key/value sets, populated via the
+  `write` extension) and `file:<dir>` (regular files as sets, streamed
+  with seek). JSON remains the built-in resource adapter for the
+  injection path.
 - **Connection scope**: `Create_Connection` takes a bare name; no
   `CONNECTION_ID` typedef plumbing beyond the integer ID.
 - **Codegen limits**: non-table union members, vectors of unions, nested
@@ -287,12 +295,12 @@ Xvfb, so File → Projects → Import could not be reached to load the
   condition variable signaled by `Write_To_Transport` (channel
   close/state change also wakes waiters). Expiry returns `NO_ERROR`
   with an empty list from `Is_Data_Available` and `TIMED_OUT` from
-  `Read_From_Transport`. The TPM is C-only (no Python mirror).
+  `Read_From_Transport`. Implemented in C (`face_tss/tpm.h`) and Python
+  (`face_tss/tpm.py`, pure-Python mirror with the same semantics).
 
 ## Remaining gaps (not started)
 - TSS distribution / multi-instance discovery beyond static config.
 - Type abstraction beyond the codegen subset.
-- TPM support.
 - Any safety/security certification artifacts.
 - The FACE CTS itself.
 

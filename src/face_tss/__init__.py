@@ -13,6 +13,7 @@ from .config import (
     config_from_mapping,
     normalize_name,
 )
+from .config_service import ConfigService, SeekWhence
 from .envelope import Envelope, decode_envelope, encode_envelope
 from .errors import (
     ConnectionClosedError,
@@ -28,6 +29,16 @@ from .errors import (
     TransportError,
 )
 from .transport import BusTransport, PubSubTransport, open_transport
+from .tpm import (
+    CHANNEL_ID_INVALID,
+    TPM_MAX_CHANNELS,
+    TPM_MAX_MSG,
+    Tpm,
+    TpmCallbackKind,
+    TpmEventType,
+    TpmLevelOfTestType,
+    TpmStateType,
+)
 from .tss import (
     ConnectionId,
     FaceTss,
@@ -70,6 +81,8 @@ __all__ = [
     "config_from_json",
     "config_from_mapping",
     "normalize_name",
+    "ConfigService",
+    "SeekWhence",
     "Envelope",
     "decode_envelope",
     "encode_envelope",
@@ -87,6 +100,14 @@ __all__ = [
     "BusTransport",
     "PubSubTransport",
     "open_transport",
+    "CHANNEL_ID_INVALID",
+    "TPM_MAX_CHANNELS",
+    "TPM_MAX_MSG",
+    "Tpm",
+    "TpmCallbackKind",
+    "TpmEventType",
+    "TpmLevelOfTestType",
+    "TpmStateType",
     "ConnectionId",
     "FaceTss",
     "MessageGuid",
