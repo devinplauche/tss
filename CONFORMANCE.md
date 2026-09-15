@@ -303,9 +303,15 @@ Xvfb, so File → Projects → Import could not be reached to load the
   (`face_tss/tpm.py`, pure-Python mirror with the same semantics).
 
 ## Remaining gaps (not started)
-- TSS distribution / multi-instance discovery beyond static config.
 - Any safety/security certification artifacts.
 - The FACE CTS itself.
+
+## Implemented extensions (not part of the FACE standard)
+
+- **UDP-broadcast peer discovery** (`face_tss/discovery.h`): instances
+  announce name + address on UDP port 51970 and discover peers without
+  static config. This is a tss implementation extension; FACE 3.2 has no
+  normative discovery protocol.
 
 ## Transport note
 nng (pub/sub, bus) is the underlying transport. FACE permits multiple

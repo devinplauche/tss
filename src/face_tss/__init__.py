@@ -14,6 +14,16 @@ from .config import (
     normalize_name,
 )
 from .config_service import ConfigService, SeekWhence
+from .discovery import (
+    DISCOVERY_ADDRESS_MAX,
+    DISCOVERY_EXPIRE_FACTOR,
+    DISCOVERY_INTERVAL_MAX_MS,
+    DISCOVERY_INTERVAL_MIN_MS,
+    DISCOVERY_MAGIC,
+    DISCOVERY_NAME_MAX,
+    DISCOVERY_PORT,
+    Discovery,
+)
 from .envelope import Envelope, decode_envelope, encode_envelope
 from .errors import (
     ConnectionClosedError,
@@ -83,6 +93,14 @@ __all__ = [
     "normalize_name",
     "ConfigService",
     "SeekWhence",
+    "DISCOVERY_ADDRESS_MAX",
+    "DISCOVERY_EXPIRE_FACTOR",
+    "DISCOVERY_INTERVAL_MAX_MS",
+    "DISCOVERY_INTERVAL_MIN_MS",
+    "DISCOVERY_MAGIC",
+    "DISCOVERY_NAME_MAX",
+    "DISCOVERY_PORT",
+    "Discovery",
     "Envelope",
     "decode_envelope",
     "encode_envelope",

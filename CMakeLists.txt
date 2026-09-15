@@ -93,6 +93,7 @@ add_library(TSS SHARED
     c/src/config.c
     c/src/config_service.c
     c/src/csp.c
+    c/src/discovery.c
     c/src/envelope.c
     c/src/marshalling.c
     c/src/qos.c
