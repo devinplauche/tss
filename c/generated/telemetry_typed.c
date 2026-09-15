@@ -41,6 +41,15 @@ static uint32_t field_at(const uint8_t *buf, uint32_t vtable,
     return rd_u16(buf + vtable + 4 + 2 * idx);
 }
 
+struct GeoPoint;
+struct Telemetry;
+static flatcc_builder_ref_t build_GeoPoint(flatcc_builder_t *B, const struct GeoPoint *m);
+static flatcc_builder_ref_t build_Telemetry(flatcc_builder_t *B, const struct Telemetry *m);
+static FACE_TSS_RETURN_CODE parse_GeoPoint(const uint8_t *buf, size_t len, uint32_t table, struct GeoPoint *m);
+static FACE_TSS_RETURN_CODE parse_Telemetry(const uint8_t *buf, size_t len, uint32_t table, struct Telemetry *m);
+static void fini_GeoPoint(struct GeoPoint *m);
+static void fini_Telemetry(struct Telemetry *m);
+
 static flatcc_builder_ref_t build_GeoPoint(flatcc_builder_t *B, const struct GeoPoint *m)
 {
     flatcc_builder_ref_t root;
@@ -127,6 +136,23 @@ static flatcc_builder_ref_t build_Telemetry(flatcc_builder_t *B, const struct Te
     return root;
 }
 
+static void fini_GeoPoint(struct GeoPoint *m)
+{
+    if (!m) return;
+}
+
+static void fini_Telemetry(struct Telemetry *m)
+{
+    if (!m) return;
+    free(m->device); m->device = NULL;
+    if (m->pos) { fini_GeoPoint(m->pos);
+        free(m->pos); m->pos = NULL; }
+    free(m->samples); m->samples = NULL;
+    m->samples_count = 0;
+    free(m->flags); m->flags = NULL;
+    m->flags_count = 0;
+}
+
 static FACE_TSS_RETURN_CODE parse_GeoPoint(const uint8_t *buf, size_t len, uint32_t table, struct GeoPoint *m)
 {
     uint32_t vtable, vsize, tsize, entry, at;
@@ -182,7 +208,7 @@ static FACE_TSS_RETURN_CODE parse_Telemetry(const uint8_t *buf, size_t len, uint
         if (n + 1 > len - start || buf[start + n] != '\0')
             return FACE_TSS_RC_INVALID_PARAM;
         m->device = (char *)malloc(n + 1);
-        if (!m->device) { Telemetry_fini(m);
+        if (!m->device) { fini_Telemetry(m);
             return FACE_TSS_RC_NOT_AVAILABLE; }
         memcpy(m->device, buf + start, n);
         m->device[n] = '\0';
@@ -212,10 +238,10 @@ static FACE_TSS_RETURN_CODE parse_Telemetry(const uint8_t *buf, size_t len, uint
             return FACE_TSS_RC_INVALID_PARAM;
         nat = at + off;
         m->pos = (struct GeoPoint *)calloc(1, sizeof(*m->pos));
-        if (!m->pos) { Telemetry_fini(m);
+        if (!m->pos) { fini_Telemetry(m);
             return FACE_TSS_RC_NOT_AVAILABLE; }
         rc = parse_GeoPoint(buf, len, nat, m->pos);
-        if (rc != FACE_TSS_RC_NO_ERROR) { Telemetry_fini(m); return rc; }
+        if (rc != FACE_TSS_RC_NO_ERROR) { fini_Telemetry(m); return rc; }
     }
     /* field 3: samples */
     entry = field_at(buf, vtable, vsize, 3);
@@ -237,7 +263,7 @@ static FACE_TSS_RETURN_CODE parse_Telemetry(const uint8_t *buf, size_t len, uint
             return FACE_TSS_RC_INVALID_PARAM;
         if (n > 0) {
             m->samples = (float *)malloc((size_t)n * 4);
-            if (!m->samples) { Telemetry_fini(m);
+            if (!m->samples) { fini_Telemetry(m);
                 return FACE_TSS_RC_NOT_AVAILABLE; }
             memcpy(m->samples, buf + start, (size_t)n * 4);
             m->samples_count = n;
@@ -263,7 +289,7 @@ static FACE_TSS_RETURN_CODE parse_Telemetry(const uint8_t *buf, size_t len, uint
             return FACE_TSS_RC_INVALID_PARAM;
         if (n > 0) {
             m->flags = (uint8_t *)malloc((size_t)n * 1);
-            if (!m->flags) { Telemetry_fini(m);
+            if (!m->flags) { fini_Telemetry(m);
                 return FACE_TSS_RC_NOT_AVAILABLE; }
             memcpy(m->flags, buf + start, (size_t)n * 1);
             m->flags_count = n;
@@ -271,23 +297,6 @@ static FACE_TSS_RETURN_CODE parse_Telemetry(const uint8_t *buf, size_t len, uint
     }
     (void)rc;
     return FACE_TSS_RC_NO_ERROR;
-}
-
-static void fini_GeoPoint(struct GeoPoint *m)
-{
-    if (!m) return;
-}
-
-static void fini_Telemetry(struct Telemetry *m)
-{
-    if (!m) return;
-    free(m->device); m->device = NULL;
-    if (m->pos) { fini_GeoPoint(m->pos);
-        free(m->pos); m->pos = NULL; }
-    free(m->samples); m->samples = NULL;
-    m->samples_count = 0;
-    free(m->flags); m->flags = NULL;
-    m->flags_count = 0;
 }
 
 void Telemetry_fini(void *msg)

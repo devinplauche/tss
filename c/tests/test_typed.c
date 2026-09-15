@@ -22,6 +22,7 @@ static void msleep(long ms)
 #include "face_tss/typed.h"
 #include "positionreport_typed.h"
 #include "telemetry_typed.h"
+#include "event_typed.h"
 
 #include <stdlib.h>
 
@@ -339,6 +340,235 @@ static void t_codegen_extensions(void)
     TEST_END();
 }
 
+/* Codegen extensions: unions, vectors of tables/strings, nested vectors,
+ * explicit field ids. In-process serialize/deserialize round trip. */
+static uint32_t ks_rd32(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+static uint16_t ks_rd16(const uint8_t *p)
+{
+    uint16_t v;
+    memcpy(&v, p, 2);
+    return v;
+}
+
+/* Vtable slot offset for field idx in the root table, 0 when absent. */
+static uint16_t ks_vslot(const uint8_t *buf, size_t len, int idx)
+{
+    uint32_t root, table, vtable;
+    uint16_t vsize;
+    int32_t soff;
+    if (len < 8)
+        return 0;
+    root = ks_rd32(buf);
+    if (root < 4 || root > (uint32_t)(len - 4))
+        return 0;
+    table = root;
+    soff = (int32_t)ks_rd32(buf + table);
+    vtable = table - (uint32_t)soff;
+    if (vtable > (uint32_t)(len - 4))
+        return 0;
+    vsize = ks_rd16(buf + vtable);
+    if (vsize < (uint16_t)(4 + 2 * idx + 2))
+        return 0;
+    return ks_rd16(buf + vtable + 4 + 2 * idx);
+}
+
+static char *ks_dup(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *c = (char *)malloc(n);
+    if (c)
+        memcpy(c, s, n);
+    return c;
+}
+
+static void t_codegen_advanced(void)
+{
+    Event out, back;
+    uint8_t *payload = NULL;
+    size_t payload_len = 0;
+    struct Alarm *al;
+    struct SensorReading *sr0, *sr1, *sr2;
+    struct Summary *sum;
+    float *row0, *row2;
+    TEST_BEGIN("codegen_advanced");
+
+    memset(&out, 0, sizeof(out));
+    out.name = ks_dup("evt-1");
+
+    /* payload: union holding an Alarm (id 2 -> slots 2,3). */
+    al = (struct Alarm *)calloc(1, sizeof(*al));
+    al->code = 7;
+    al->message = ks_dup("boom");
+    out.payload.type = EventPayload_Alarm;
+    out.payload.value = al;
+
+    /* tags: [string] (id 7). */
+    out.tags_count = 3;
+    out.tags = (char **)malloc(3 * sizeof(char *));
+    out.tags[0] = ks_dup("a");
+    out.tags[1] = ks_dup("bb");
+    out.tags[2] = ks_dup("ccc");
+
+    /* readings: [SensorReading] (id 0). */
+    out.readings_count = 2;
+    out.readings =
+        (struct SensorReading **)malloc(2 * sizeof(struct SensorReading *));
+    sr0 = (struct SensorReading *)calloc(1, sizeof(*sr0));
+    sr0->value = 1.5;
+    sr0->unit = ks_dup("m");
+    sr1 = (struct SensorReading *)calloc(1, sizeof(*sr1));
+    sr1->value = 2.5;
+    sr1->unit = ks_dup("s");
+    out.readings[0] = sr0;
+    out.readings[1] = sr1;
+
+    /* matrix: [[float]] with an empty middle row (id 4). */
+    out.matrix_count = 3;
+    out.matrix = (float **)malloc(3 * sizeof(float *));
+    out.matrix_counts = (size_t *)malloc(3 * sizeof(size_t));
+    row0 = (float *)malloc(2 * sizeof(float));
+    row0[0] = 1.0f;
+    row0[1] = 2.0f;
+    row2 = (float *)malloc(sizeof(float));
+    row2[0] = 3.0f;
+    out.matrix[0] = row0;
+    out.matrix_counts[0] = 2;
+    out.matrix[1] = NULL;
+    out.matrix_counts[1] = 0;
+    out.matrix[2] = row2;
+    out.matrix_counts[2] = 1;
+
+    /* summary: nested table, auto-assigned ids, union + table vector. */
+    sum = (struct Summary *)calloc(1, sizeof(*sum));
+    sum->title = ks_dup("s");
+    sum->items_count = 1;
+    sum->items = (struct Alarm **)malloc(sizeof(struct Alarm *));
+    sum->items[0] = (struct Alarm *)calloc(1, sizeof(struct Alarm));
+    sum->items[0]->code = 1;
+    sum->items[0]->message = ks_dup("x");
+    sr2 = (struct SensorReading *)calloc(1, sizeof(*sr2));
+    sr2->value = 9.9;
+    sr2->unit = ks_dup("km");
+    sum->last.type = EventPayload_SensorReading;
+    sum->last.value = sr2;
+    out.summary = sum;
+
+    CHECK_RC(Event_serialize(&out, &payload, &payload_len),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(payload != NULL && payload_len > 0);
+
+    memset(&back, 0, sizeof(back));
+    CHECK_RC(Event_deserialize(payload, payload_len, &back),
+             FACE_TSS_RC_NO_ERROR);
+    CHECK(strcmp(back.name, "evt-1") == 0);
+    /* union */
+    CHECK(back.payload.type == EventPayload_Alarm);
+    CHECK(back.payload.value != NULL);
+    CHECK(((struct Alarm *)back.payload.value)->code == 7);
+    CHECK(strcmp(((struct Alarm *)back.payload.value)->message, "boom") == 0);
+    /* [string] */
+    CHECK(back.tags_count == 3);
+    CHECK(strcmp(back.tags[0], "a") == 0);
+    CHECK(strcmp(back.tags[1], "bb") == 0);
+    CHECK(strcmp(back.tags[2], "ccc") == 0);
+    /* [table] */
+    CHECK(back.readings_count == 2);
+    CHECK(back.readings[0]->value == 1.5);
+    CHECK(strcmp(back.readings[0]->unit, "m") == 0);
+    CHECK(back.readings[1]->value == 2.5);
+    CHECK(strcmp(back.readings[1]->unit, "s") == 0);
+    /* [[float]] */
+    CHECK(back.matrix_count == 3);
+    CHECK(back.matrix_counts[0] == 2);
+    CHECK(back.matrix[0][0] == 1.0f && back.matrix[0][1] == 2.0f);
+    CHECK(back.matrix[1] == NULL && back.matrix_counts[1] == 0);
+    CHECK(back.matrix_counts[2] == 1 && back.matrix[2][0] == 3.0f);
+    /* nested summary, auto ids */
+    CHECK(back.summary != NULL);
+    CHECK(strcmp(back.summary->title, "s") == 0);
+    CHECK(back.summary->items_count == 1);
+    CHECK(back.summary->items[0]->code == 1);
+    CHECK(strcmp(back.summary->items[0]->message, "x") == 0);
+    CHECK(back.summary->last.type == EventPayload_SensorReading);
+    CHECK(((struct SensorReading *)back.summary->last.value)->value == 9.9);
+    CHECK(strcmp(((struct SensorReading *)back.summary->last.value)->unit,
+                 "km") == 0);
+    Event_fini(&back);
+    Event_fini(&out);
+    free(payload);
+    payload = NULL;
+
+    /* Explicit ids land in the right vtable slots: only name (id 5) set. */
+    {
+        Event sparse, sparse_back;
+        uint8_t *p2 = NULL;
+        size_t l2 = 0;
+        int i;
+        memset(&sparse, 0, sizeof(sparse));
+        sparse.name = ks_dup("only-name");
+        CHECK_RC(Event_serialize(&sparse, &p2, &l2), FACE_TSS_RC_NO_ERROR);
+        for (i = 0; i < 10; i++) {
+            if (i == 5)
+                CHECK(ks_vslot(p2, l2, i) != 0);
+            else
+                CHECK(ks_vslot(p2, l2, i) == 0);
+        }
+        memset(&sparse_back, 0, sizeof(sparse_back));
+        CHECK_RC(Event_deserialize(p2, l2, &sparse_back),
+                 FACE_TSS_RC_NO_ERROR);
+        CHECK(strcmp(sparse_back.name, "only-name") == 0);
+        CHECK(sparse_back.payload.type == EventPayload_NONE);
+        CHECK(sparse_back.payload.value == NULL);
+        CHECK(sparse_back.tags == NULL && sparse_back.tags_count == 0);
+        CHECK(sparse_back.readings == NULL &&
+              sparse_back.readings_count == 0);
+        CHECK(sparse_back.matrix == NULL && sparse_back.matrix_count == 0);
+        CHECK(sparse_back.summary == NULL);
+        Event_fini(&sparse_back);
+        Event_fini(&sparse);
+        free(p2);
+    }
+
+    /* Corrupt the union discriminator -> INVALID_PARAM, no crash. */
+    {
+        Event with_union, uback;
+        uint8_t *p3 = NULL;
+        size_t l3 = 0;
+        uint32_t root, table;
+        uint16_t tslot;
+        int32_t soff;
+        struct Alarm *al2 = (struct Alarm *)calloc(1, sizeof(*al2));
+        memset(&with_union, 0, sizeof(with_union));
+        al2->code = 3;
+        al2->message = ks_dup("z");
+        with_union.payload.type = EventPayload_Alarm;
+        with_union.payload.value = al2;
+        CHECK_RC(Event_serialize(&with_union, &p3, &l3),
+                 FACE_TSS_RC_NO_ERROR);
+        root = ks_rd32(p3);
+        table = root;
+        soff = (int32_t)ks_rd32(p3 + table);
+        tslot = ks_vslot(p3, l3, 2); /* discriminator slot (id 2) */
+        CHECK(tslot != 0);
+        p3[table + tslot] = 99; /* unknown discriminator */
+        memset(&uback, 0, sizeof(uback));
+        CHECK(Event_deserialize(p3, l3, &uback) ==
+              FACE_TSS_RC_INVALID_PARAM);
+        Event_fini(&uback);
+        Event_fini(&with_union);
+        free(p3);
+        (void)soff;
+    }
+
+    TEST_END();
+}
+
 /* FACE 3.2: Unregister_Callback lives on TypedTS. */
 static void t_typed_unregister(void)
 {
@@ -382,5 +612,6 @@ int main(void)
     t_typed_unregister();
     t_typed_guid_mismatch();
     t_codegen_extensions();
+    t_codegen_advanced();
     return TEST_SUMMARY();
 }

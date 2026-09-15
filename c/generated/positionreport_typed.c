@@ -41,6 +41,11 @@ static uint32_t field_at(const uint8_t *buf, uint32_t vtable,
     return rd_u16(buf + vtable + 4 + 2 * idx);
 }
 
+struct PositionReport;
+static flatcc_builder_ref_t build_PositionReport(flatcc_builder_t *B, const struct PositionReport *m);
+static FACE_TSS_RETURN_CODE parse_PositionReport(const uint8_t *buf, size_t len, uint32_t table, struct PositionReport *m);
+static void fini_PositionReport(struct PositionReport *m);
+
 static flatcc_builder_ref_t build_PositionReport(flatcc_builder_t *B, const struct PositionReport *m)
 {
     flatcc_builder_ref_t root;
@@ -97,6 +102,12 @@ static flatcc_builder_ref_t build_PositionReport(flatcc_builder_t *B, const stru
     return root;
 }
 
+static void fini_PositionReport(struct PositionReport *m)
+{
+    if (!m) return;
+    free(m->vehicle_id); m->vehicle_id = NULL;
+}
+
 static FACE_TSS_RETURN_CODE parse_PositionReport(const uint8_t *buf, size_t len, uint32_t table, struct PositionReport *m)
 {
     uint32_t vtable, vsize, tsize, entry, at;
@@ -122,7 +133,7 @@ static FACE_TSS_RETURN_CODE parse_PositionReport(const uint8_t *buf, size_t len,
         if (n + 1 > len - start || buf[start + n] != '\0')
             return FACE_TSS_RC_INVALID_PARAM;
         m->vehicle_id = (char *)malloc(n + 1);
-        if (!m->vehicle_id) { PositionReport_fini(m);
+        if (!m->vehicle_id) { fini_PositionReport(m);
             return FACE_TSS_RC_NOT_AVAILABLE; }
         memcpy(m->vehicle_id, buf + start, n);
         m->vehicle_id[n] = '\0';
@@ -179,12 +190,6 @@ static FACE_TSS_RETURN_CODE parse_PositionReport(const uint8_t *buf, size_t len,
     }
     (void)rc;
     return FACE_TSS_RC_NO_ERROR;
-}
-
-static void fini_PositionReport(struct PositionReport *m)
-{
-    if (!m) return;
-    free(m->vehicle_id); m->vehicle_id = NULL;
 }
 
 void PositionReport_fini(void *msg)

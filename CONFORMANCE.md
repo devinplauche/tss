@@ -169,12 +169,20 @@ Xvfb, so File → Projects → Import could not be reached to load the
   callback bridge.
 - Code generator: `.fbs` tables (scalar + string fields, nested tables,
   scalar vectors, enums with integral backing types) -> C value struct +
-  codec + descriptor. Unions, vectors of tables/strings, nested vectors,
-  non-integral-backed enums, explicit field IDs, and unknown types are
+  codec + descriptor. Also supported: unions of tables (discriminator as
+  `ubyte` at the declared id, value table at id+1), vectors of tables,
+  vectors of strings, nested vectors of scalars (`[[float]]`), and
+  explicit field ids (`f:int (id: 3)`, all-or-none per table, union value
+  takes the next id). Non-table union members, vectors of unions, nested
+  non-scalar vectors, non-integral-backed enums, and unknown types are
   rejected with a clear error. Deterministic 63-bit FNV-1a message GUID
   from the qualified type name.
 - Generated + checked in: `c/generated/positionreport_typed.*`
-  (`FaceTSS.PositionReport`, GUID `7542349876525629205`).
+  (`FaceTSS.PositionReport`, GUID `7542349876525629205`),
+  `c/generated/telemetry_typed.*` (`FaceTSS.Telemetry`), and
+  `c/generated/event_typed.*` (`FaceTSS.Event`, GUID `6175617105530255968`)
+  from `c/schemas/kitchen_sink.fbs`, which exercises unions, vectors of
+  tables/strings, nested scalar vectors, and explicit ids.
 - New CTest suite `c-typed` and `face_tss_typed_pubsub` demo.
 
 ### Python mirror
@@ -219,9 +227,14 @@ Xvfb, so File → Projects → Import could not be reached to load the
   JSON remains the built-in resource adapter.
 - **Connection scope**: `Create_Connection` takes a bare name; no
   `CONNECTION_ID` typedef plumbing beyond the integer ID.
-- **Codegen limits**: unions, vectors of tables/strings, nested vectors,
-  and explicit field IDs are still rejected. Supported: multiple tables per
-  file, nested tables, scalar vectors, enums with explicit integral base.
+- **Codegen limits**: non-table union members, vectors of unions, nested
+  non-scalar vectors, non-integral-backed enums, and unknown types are
+  rejected. Supported: multiple tables per file, nested tables, scalar
+  vectors, enums with explicit integral base, unions of tables, vectors
+  of tables/strings, nested scalar vectors, and explicit field ids
+  (all-or-none per table; `[[scalar]]` nested vectors are this
+  implementation's own extension, verified by round-trip tests, not by
+  interop with the official flatc compiler).
 - **Late subscriber**: fixed — dials are non-blocking with background retry,
   so start order no longer matters for connectivity. Messages sent before
   the subscription propagates are still dropped (inherent pub/sub).

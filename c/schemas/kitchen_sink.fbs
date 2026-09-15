@@ -1,0 +1,38 @@
+// Exercises codegen extensions: unions of tables, vectors of tables and
+// strings, nested vectors of scalars, and explicit field ids.
+// Applications define their own .fbs schemas like this one; the TSS carries
+// the serialized bytes opaquely in TssEnvelope.payload.
+
+namespace FaceTSS;
+
+table SensorReading {
+  value:double (id: 2);
+  unit:string (id: 0);
+}
+
+table Alarm {
+  code:int (id: 1);
+  message:string (id: 3);
+}
+
+union EventPayload {
+  SensorReading,
+  Alarm
+}
+
+table Summary {
+  title:string;
+  items:[Alarm];
+  last:EventPayload;
+}
+
+table Event {
+  name:string (id: 5);
+  payload:EventPayload (id: 2);
+  tags:[string] (id: 7);
+  readings:[SensorReading] (id: 0);
+  matrix:[[float]] (id: 4);
+  summary:Summary (id: 9);
+}
+
+root_type Event;
