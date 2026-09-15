@@ -18,6 +18,7 @@
 #include <windows.h>
 static void msleep(long ms) { Sleep((DWORD)ms); }
 #else
+#include <pthread.h>
 #include <time.h>
 static void msleep(long ms)
 {
@@ -398,7 +399,52 @@ static void t_receive_into(void)
     TEST_END();
 }
 
-typedef struct { volatile int n; char last[64]; size_t last_len; } cb_state_t;
+typedef struct {
+    int n;
+    char last[64];
+    size_t last_len;
+#if defined(_WIN32)
+    CRITICAL_SECTION mtx;
+#else
+    pthread_mutex_t mtx;
+#endif
+} cb_state_t;
+
+static void cb_state_init(cb_state_t *s)
+{
+#if defined(_WIN32)
+    InitializeCriticalSection(&s->mtx);
+#else
+    pthread_mutex_init(&s->mtx, NULL);
+#endif
+}
+
+static void cb_state_fini(cb_state_t *s)
+{
+#if defined(_WIN32)
+    DeleteCriticalSection(&s->mtx);
+#else
+    pthread_mutex_destroy(&s->mtx);
+#endif
+}
+
+static void cb_state_lock(cb_state_t *s)
+{
+#if defined(_WIN32)
+    EnterCriticalSection(&s->mtx);
+#else
+    pthread_mutex_lock(&s->mtx);
+#endif
+}
+
+static void cb_state_unlock(cb_state_t *s)
+{
+#if defined(_WIN32)
+    LeaveCriticalSection(&s->mtx);
+#else
+    pthread_mutex_unlock(&s->mtx);
+#endif
+}
 
 static void on_msg(FACE_TSS_CONNECTION_ID_TYPE id,
                    FACE_TSS_TRANSACTION_ID_TYPE txn,
@@ -417,10 +463,12 @@ static void on_msg(FACE_TSS_CONNECTION_ID_TYPE id,
     (void)guid;
     (void)header;
     (void)qos;
+    cb_state_lock(s);
     memcpy(s->last, payload, n);
     s->last[n] = '\0';
     s->last_len = payload_len;
     s->n++;
+    cb_state_unlock(s);
     *return_code = FACE_TSS_RC_NO_ERROR;
 }
 
@@ -436,6 +484,7 @@ static void t_callback(void)
     int waited = 0;
     TEST_BEGIN("callback_delivery");
     memset(&st, 0, sizeof(st));
+    cb_state_init(&st);
     addr(a);
     mk_cfg(&pc, "POSITION", a, FACE_TSS_BI_DIRECTIONAL,
            FACE_TSS_TRANSPORT_PUBSUB, FACE_TSS_ROLE_PUBLISHER);
@@ -457,17 +506,32 @@ static void t_callback(void)
     CHECK_RC(face_tss_send_message(pub, pid, 5000000000LL, &txn,
                                    (const uint8_t *)"via-callback", 12),
              FACE_TSS_RC_NO_ERROR);
-    while (!st.n && waited < 50) {
+    while (waited < 50) {
+        int n;
+        cb_state_lock(&st);
+        n = st.n;
+        cb_state_unlock(&st);
+        if (n)
+            break;
         msleep(100);
         waited++;
     }
-    CHECK(st.n == 1);
-    CHECK(strcmp(st.last, "via-callback") == 0);
+    {
+        int n;
+        char last[64];
+        cb_state_lock(&st);
+        n = st.n;
+        memcpy(last, st.last, sizeof(last));
+        cb_state_unlock(&st);
+        CHECK(n == 1);
+        CHECK(strcmp(last, "via-callback") == 0);
+    }
     CHECK_RC(face_tss_unregister_callback(sub, sid), FACE_TSS_RC_NO_ERROR);
     face_tss_destroy(pub);
     face_tss_destroy(sub);
     face_tss_config_fini(&pc);
     face_tss_config_fini(&sc);
+    cb_state_fini(&st);
     TEST_END();
 }
 

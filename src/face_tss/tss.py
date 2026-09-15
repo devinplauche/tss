@@ -27,9 +27,14 @@ Connection model (one FACE connection = one nng socket, see transport.py):
 IDs: Create_Connection returns increasing ints starting at 1 (0 is reserved
 as CONNECTION_ID_INVALID).
 
-Threading: one RLock guards all connection-table and sequence mutations.
-Transports are used under that lock for table/sequence consistency; the nng
-sockets themselves are thread-safe for concurrent send/recv.
+Threading: one RLock guards the connection table, sequence numbers,
+stats, and QoS policies. The lock is never held across blocking
+transport I/O: send/receive snapshot what they need, release the lock,
+perform the I/O, then re-take the lock for stats. Callback threads are
+never joined while holding the lock (``Transport.shutdown`` stops the
+loop and closes the socket first, outside the TSS lock), so a callback
+that re-enters the TSS - including one that unregisters itself - cannot
+deadlock. nng sockets are thread-safe for concurrent send/recv.
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ from .errors import (
     ResourceLimitError,
     TimedOutError,
 )
-from .transport import CallbackHandle, Transport, open_transport
+from .transport import Transport, open_transport
 from .types import (
     CONNECTION_ID_INVALID,
     MAX_CONNECTIONS,
@@ -115,7 +120,6 @@ class _Connection:
     send_seq: int = 0
     callback: MessageCallback | None = None
     callback_context: object = None
-    callback_handle: CallbackHandle | None = None
 
 
 @dataclass
@@ -144,6 +148,9 @@ class FaceTss:
         self._connections: dict[ConnectionId, _Connection] = {}
         self._qos_policies: dict[ConnectionId, dict[QosPolicyKind, int]] = {}
         self._stats = TssStats()
+        # Set while finalize() is tearing down. Entry points fail fast
+        # with NotInitializedError instead of racing the teardown.
+        self._finalizing = False
 
     # -- properties -----------------------------------------------------
     @property
@@ -253,11 +260,33 @@ class FaceTss:
         return self.initialize(config)
 
     def finalize(self) -> None:
-        """Close every connection and return to the uninitialized state."""
+        """Close every connection and return to the uninitialized state.
+
+        Callback threads are stopped and transports shut down with the
+        TSS lock released, so a callback blocked re-entering the TSS
+        cannot deadlock the teardown.
+        """
         with self._lock:
-            for conn_id in list(self._connections.keys()):
-                self._destroy_locked(conn_id)
+            if self._finalizing:
+                return
+            self._finalizing = True
+            conns = list(self._connections.values())
+            self._connections.clear()
+            self._qos_policies.clear()
+            for conn in conns:
+                conn.closed = True
+                conn.callback = None
+                conn.callback_context = None
+        # Outside the lock: stop callback loops (joining a dispatch that
+        # may need the TSS lock), abort blocked I/O via socket close.
+        for conn in conns:
+            try:
+                conn.transport.shutdown()
+            except Exception:
+                pass
+        with self._lock:
             self._initialized = False
+            self._finalizing = False
 
     # -- connections -----------------------------------------------------
     def create_connection(self, name: str) -> tuple[ConnectionId, int]:
@@ -275,7 +304,7 @@ class FaceTss:
     def destroy_connection(self, connection_id: ConnectionId) -> ReturnCode:
         """FACE::TS::Destroy_Connection. Idempotent per FACE (NO_ACTION)."""
         with self._lock:
-            self._require_initialized()
+            self._require_usable()
             conn = self._connections.get(connection_id)
             if conn is None:
                 # Unknown id: either never existed (INVALID_PARAM) or was
@@ -285,27 +314,29 @@ class FaceTss:
                 if connection_id == CONNECTION_ID_INVALID:
                     raise InvalidParamError("invalid connection id 0")
                 return ReturnCode.NO_ACTION
-            self._destroy_locked(connection_id)
-            return ReturnCode.NO_ERROR
-
-    def _destroy_locked(self, connection_id: ConnectionId) -> None:
-        conn = self._connections.pop(connection_id, None)
-        if conn is None:
-            return
-        conn.closed = True
-        if conn.callback_handle is not None:
-            try:
-                conn.callback_handle.cancel()
-            except Exception:
-                pass
-            conn.callback_handle = None
-        conn.callback = None
-        conn.callback_context = None
+            conn = self._detach_locked(connection_id)
+        # Outside the lock: stop the callback thread (it may be inside a
+        # dispatch needing the TSS lock) and abort blocked I/O.
         try:
-            conn.transport.close()
+            conn.transport.shutdown()
         except Exception:
             pass
+        return ReturnCode.NO_ERROR
+
+    def _detach_locked(self, connection_id: ConnectionId) -> _Connection | None:
+        """Pop a connection and detach its callback; caller holds the lock.
+
+        New dispatches observe callback=None and drop. The caller must
+        shut the transport down with the lock released.
+        """
+        conn = self._connections.pop(connection_id, None)
+        if conn is None:
+            return None
+        conn.closed = True
+        conn.callback = None
+        conn.callback_context = None
         self._qos_policies.pop(connection_id, None)
+        return conn
 
     def connection_names(self) -> dict[ConnectionId, str]:
         with self._lock:
@@ -397,6 +428,11 @@ class FaceTss:
             )
             conn.send_seq += 1
             instance_uid = (self._instance_uid + conn.send_seq) & ((1 << 63) - 1)
+            transport = conn.transport
+            # Snapshot everything the blocking send needs; the _Connection
+            # stays alive via this reference even if another thread
+            # destroys the connection mid-send (the transport then fails
+            # the send instead of touching freed state).
             env = Envelope(
                 connection_name=conn.config.name,
                 transaction_id=txn,
@@ -407,16 +443,21 @@ class FaceTss:
                 message_guid=int(message_guid),
                 instance_uid=instance_uid,
             )
-            try:
-                conn.transport.send(env, timeout_ns)
-            except FaceTssError:
+        # Blocking I/O with the TSS lock released: one slow send must not
+        # stall unrelated connections or block finalize().
+        try:
+            transport.send(env, timeout_ns)
+        except FaceTssError:
+            with self._lock:
                 self._stats.send_errors += 1
-                raise
-            except Exception as exc:  # pragma: no cover - defensive
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            with self._lock:
                 self._stats.send_errors += 1
-                raise FaceTssError(ReturnCode.NO_ACTION, f"send failed: {exc}") from exc
+            raise FaceTssError(ReturnCode.NO_ACTION, f"send failed: {exc}") from exc
+        with self._lock:
             self._stats.sent += 1
-            return txn
+        return txn
 
     # -- messaging: Receive_Message ---------------------------------------
     @staticmethod
@@ -449,11 +490,16 @@ class FaceTss:
                 raise InvalidModeError(
                     f"connection {conn.config.name} is SOURCE-only"
                 )
-            try:
-                env = conn.transport.receive(timeout_ns)
-            except TimedOutError:
+            transport = conn.transport
+        # Blocking I/O with the TSS lock released: one thread's receive
+        # must not stall the rest of the instance.
+        try:
+            env = transport.receive(timeout_ns)
+        except TimedOutError:
+            with self._lock:
                 self._stats.receive_timeouts += 1
-                raise
+            raise
+        with self._lock:
             if len(env.payload) < min_message_size:
                 raise DataBufferTooSmallError(
                     f"payload {len(env.payload)} < required {min_message_size}"
@@ -499,11 +545,15 @@ class FaceTss:
                 raise InvalidModeError(
                     f"connection {conn.config.name} is SOURCE-only"
                 )
-            try:
-                env = conn.transport.receive(timeout_ns)
-            except TimedOutError:
+            transport = conn.transport
+        # Blocking I/O with the TSS lock released.
+        try:
+            env = transport.receive(timeout_ns)
+        except TimedOutError:
+            with self._lock:
                 self._stats.receive_timeouts += 1
-                raise
+            raise
+        with self._lock:
             if len(env.payload) < min_message_size:
                 raise DataBufferTooSmallError(
                     f"payload {len(env.payload)} < required {min_message_size}"
@@ -602,7 +652,7 @@ class FaceTss:
                 with self._lock:
                     self._stats.received += 1
 
-            conn.callback_handle = conn.transport.start_callback(_dispatch)
+            conn.transport.start_callback(_dispatch)
             return ReturnCode.NO_ERROR
 
     def unregister_callback(self, connection_id: ConnectionId) -> ReturnCode:
@@ -611,28 +661,41 @@ class FaceTss:
         FACE 3.1 placed Unregister_Callback on the Base interface; FACE 3.2
         moved it to TypedTS. The Python mirror exposes one method covering
         both (typed and untyped callbacks share the connection slot).
+
+        Safe to call from inside the callback itself: the stop is
+        signaled and the dispatch thread is not joined by its own thread.
         """
         with self._lock:
             conn = self._require_open(connection_id)
             if conn.callback is None:
                 return ReturnCode.NO_ACTION
-            if conn.callback_handle is not None:
-                try:
-                    conn.callback_handle.cancel()
-                except Exception:
-                    pass
-                conn.callback_handle = None
+            # Detach first so no new dispatch starts; the transport owns
+            # the thread handle now.
             conn.callback = None
             conn.callback_context = None
-            return ReturnCode.NO_ERROR
+            transport = conn.transport
+        # Join the dispatch thread with the TSS lock released: an
+        # in-flight dispatch may be blocked acquiring it. stop_callback
+        # leaves the socket open, so the connection stays usable and a
+        # callback can be re-registered later.
+        try:
+            transport.stop_callback()
+        except Exception:
+            pass
+        return ReturnCode.NO_ERROR
 
     # -- internals ---------------------------------------------------------
+    def _require_usable(self) -> None:
+        """Fail fast while finalize() is tearing down (lock held)."""
+        if self._finalizing or not self._initialized:
+            raise NotInitializedError
+
     def _require_initialized(self) -> None:
-        if not self._initialized:
+        if self._finalizing or not self._initialized:
             raise NotInitializedError
 
     def _require_open(self, connection_id: ConnectionId) -> _Connection:
-        self._require_initialized()
+        self._require_usable()
         conn = self._connections.get(connection_id)
         if conn is None or conn.closed:
             raise ConnectionClosedError(f"connection id {connection_id} is closed")

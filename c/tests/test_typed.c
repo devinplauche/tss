@@ -7,6 +7,7 @@
 #include <windows.h>
 static void msleep(long ms) { Sleep((DWORD)ms); }
 #else
+#include <pthread.h>
 #include <time.h>
 static void msleep(long ms)
 {
@@ -166,7 +167,51 @@ static void t_typed_round_trip(void)
     TEST_END();
 }
 
-typedef struct { volatile int n; double last_lat; } tcb_state_t;
+typedef struct {
+    int n;
+    double last_lat;
+#if defined(_WIN32)
+    CRITICAL_SECTION mtx;
+#else
+    pthread_mutex_t mtx;
+#endif
+} tcb_state_t;
+
+static void tcb_state_init(tcb_state_t *s)
+{
+#if defined(_WIN32)
+    InitializeCriticalSection(&s->mtx);
+#else
+    pthread_mutex_init(&s->mtx, NULL);
+#endif
+}
+
+static void tcb_state_fini(tcb_state_t *s)
+{
+#if defined(_WIN32)
+    DeleteCriticalSection(&s->mtx);
+#else
+    pthread_mutex_destroy(&s->mtx);
+#endif
+}
+
+static void tcb_state_lock(tcb_state_t *s)
+{
+#if defined(_WIN32)
+    EnterCriticalSection(&s->mtx);
+#else
+    pthread_mutex_lock(&s->mtx);
+#endif
+}
+
+static void tcb_state_unlock(tcb_state_t *s)
+{
+#if defined(_WIN32)
+    LeaveCriticalSection(&s->mtx);
+#else
+    pthread_mutex_unlock(&s->mtx);
+#endif
+}
 
 static void on_typed(FACE_TSS_CONNECTION_ID_TYPE id,
                      FACE_TSS_TRANSACTION_ID_TYPE txn,
@@ -186,8 +231,10 @@ static void on_typed(FACE_TSS_CONNECTION_ID_TYPE id,
         *return_code = FACE_TSS_RC_INVALID_PARAM;
         return;
     }
+    tcb_state_lock(s);
     s->last_lat = r->latitude_deg;
     s->n++;
+    tcb_state_unlock(s);
     *return_code = FACE_TSS_RC_NO_ERROR;
 }
 
@@ -202,6 +249,7 @@ static void t_typed_callback(void)
     int waited = 0;
     TEST_BEGIN("typed_callback");
     memset(&st, 0, sizeof(st));
+    tcb_state_init(&st);
     addr(a);
     make_pair(a, &pub, &sub, &pid, &sid);
     CHECK_RC(face_tss_typed_register_callback(sub, sid,
@@ -217,15 +265,30 @@ static void t_typed_callback(void)
     CHECK_RC(face_tss_typed_send(pub, pid, 5000000000LL, &txn,
                                  "FaceTSS.PositionReport", &out),
              FACE_TSS_RC_NO_ERROR);
-    while (!st.n && waited < 50) {
+    while (waited < 50) {
+        int n;
+        tcb_state_lock(&st);
+        n = st.n;
+        tcb_state_unlock(&st);
+        if (n)
+            break;
         msleep(100);
         waited++;
     }
-    CHECK(st.n == 1);
-    CHECK(st.last_lat == 1.5);
+    {
+        int n;
+        double last_lat;
+        tcb_state_lock(&st);
+        n = st.n;
+        last_lat = st.last_lat;
+        tcb_state_unlock(&st);
+        CHECK(n == 1);
+        CHECK(last_lat == 1.5);
+    }
     CHECK_RC(face_tss_unregister_callback(sub, sid), FACE_TSS_RC_NO_ERROR);
     face_tss_destroy(pub);
     face_tss_destroy(sub);
+    tcb_state_fini(&st);
     TEST_END();
 }
 
@@ -578,6 +641,7 @@ static void t_typed_unregister(void)
     tcb_state_t st;
     TEST_BEGIN("typed_unregister");
     memset(&st, 0, sizeof(st));
+    tcb_state_init(&st);
     addr(a);
     make_pair(a, &pub, &sub, &pid, &sid);
     CHECK_RC(face_tss_typed_unregister_callback(sub, sid, "Nope.Type"),
@@ -600,6 +664,7 @@ static void t_typed_unregister(void)
     CHECK_RC(face_tss_unregister_callback(sub, sid), FACE_TSS_RC_NO_ERROR);
     face_tss_destroy(pub);
     face_tss_destroy(sub);
+    tcb_state_fini(&st);
     TEST_END();
 }
 

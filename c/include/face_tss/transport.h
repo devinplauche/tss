@@ -40,6 +40,12 @@ FACE_TSS_RETURN_CODE face_tss_transport_open_dial(
 
 void face_tss_transport_close(FACE_TSS_TRANSPORT *t);
 
+/* Stop the callback thread and close the socket without freeing the
+ * handle. Idempotent. Closing the socket aborts any thread blocked in
+ * send/receive, which is how teardown interrupts in-flight I/O without
+ * holding higher-level locks. */
+void face_tss_transport_shutdown(FACE_TSS_TRANSPORT *t);
+
 /* Send one envelope (framed per transport), waiting at most timeout_ns
  * for the send to complete (infinite when -1, non-blocking when 0). */
 FACE_TSS_RETURN_CODE face_tss_transport_send(

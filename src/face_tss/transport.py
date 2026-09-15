@@ -60,15 +60,31 @@ def ns_to_ms(timeout_ns: int | None) -> int:
 
 
 class CallbackHandle:
-    """Background receive loop returned by Transport.start_callback()."""
+    """Background receive loop returned by Transport.start_callback().
+
+    ``cancel()`` signals the loop to stop and waits for the thread.
+    Calling it from the callback thread itself is safe: the stop is
+    signaled and the join is skipped (joining the current thread would
+    raise), so the loop simply exits after the in-flight dispatch.
+    """
 
     def __init__(self, stop: Callable[[], None], thread: threading.Thread) -> None:
         self._stop = stop
         self._thread = thread
 
-    def cancel(self, timeout: float = 5.0) -> None:
+    def request_stop(self) -> None:
         self._stop()
+
+    def join(self, timeout: float | None = None) -> None:
+        # Never join the current thread: a callback that unregisters
+        # itself would deadlock (or raise RuntimeError) otherwise.
+        if threading.current_thread() is self._thread:
+            return
         self._thread.join(timeout=timeout)
+
+    def cancel(self, timeout: float = 5.0) -> None:
+        self.request_stop()
+        self.join(timeout=timeout)
 
     @property
     def alive(self) -> bool:
@@ -82,25 +98,67 @@ class Transport:
         self.config = config
         self._socket: pynng.Socket | None = None
         self._lock = threading.Lock()
+        # The nng timeout options are per-socket, not per-call, so a
+        # send and a receive that program them concurrently would apply
+        # each other's timeouts. Serialize same-direction I/O; sends and
+        # receives stay independent of each other.
+        self._send_lock = threading.Lock()
+        self._recv_lock = threading.Lock()
+        self._callback_handle: CallbackHandle | None = None
 
     # -- lifecycle ------------------------------------------------------
     def open(self) -> None:
         raise NotImplementedError
 
     def close(self) -> None:
-        sock, self._socket = self._socket, None
+        """Close the socket, aborting any blocked send/receive.
+
+        Idempotent. Frees nothing else; see shutdown() for the ordered
+        teardown that also stops the callback thread first.
+        """
+        with self._lock:
+            sock, self._socket = self._socket, None
         if sock is not None:
             try:
                 sock.close()
             except Exception:
                 pass
 
+    def stop_callback(self) -> None:
+        """Stop the callback thread without closing the transport.
+
+        Signals the loop to stop and joins it, leaving the socket open
+        so the connection stays usable (e.g. for re-registration). Safe
+        to call from any thread, including the callback thread itself
+        (the join is skipped then); idempotent.
+        """
+        with self._lock:
+            handle, self._callback_handle = self._callback_handle, None
+        if handle is not None:
+            handle.cancel()
+
+    def shutdown(self) -> None:
+        """Ordered teardown: stop callbacks, abort blocked I/O, join.
+
+        Signals the callback loop to stop, then closes the socket so any
+        thread blocked in send()/receive() wakes with an error, then
+        joins the callback thread. Safe to call from any thread,
+        including the callback thread itself (the join is skipped then).
+        After this returns no callback dispatch is in flight.
+        """
+        self.stop_callback()
+        # Close before joining: a callback thread parked in a blocking
+        # receive would otherwise stall the join indefinitely.
+        self.close()
+
     @property
     def is_open(self) -> bool:
-        return self._socket is not None
+        with self._lock:
+            return self._socket is not None
 
     def _require(self) -> pynng.Socket:
-        sock = self._socket
+        with self._lock:
+            sock = self._socket
         if sock is None:
             raise TransportError(
                 f"connection {self.config.name}: transport is not open"
@@ -118,7 +176,12 @@ class Transport:
     def start_callback(
         self, handler: Callable[[Envelope], None]
     ) -> CallbackHandle:
-        """Invoke ``handler`` on a daemon thread for every received envelope."""
+        """Invoke ``handler`` on a daemon thread for every received envelope.
+
+        The loop polls in 100 ms slices; ``shutdown()`` aborts a blocked
+        receive by closing the socket. Only one callback runs per
+        transport; starting a second one replaces the first.
+        """
         stop_event = threading.Event()
 
         def _loop() -> None:
@@ -128,9 +191,9 @@ class Transport:
                 except TimedOutError:
                     continue
                 except Exception:
-                    if stop_event.is_set():
-                        break
-                    continue
+                    # Socket closed (shutdown) or a fatal transport
+                    # error: leave rather than spin on a dead socket.
+                    break
                 if stop_event.is_set():
                     break
                 try:
@@ -144,7 +207,14 @@ class Transport:
             daemon=True,
         )
         thread.start()
-        return CallbackHandle(stop_event.set, thread)
+        handle = CallbackHandle(stop_event.set, thread)
+        with self._lock:
+            old, self._callback_handle = self._callback_handle, handle
+        if old is not None:
+            # Join outside the transport lock: the old loop may briefly
+            # need it on its way out.
+            old.cancel()
+        return handle
 
 
 class PubSubTransport(Transport):
@@ -176,35 +246,38 @@ class PubSubTransport(Transport):
                 f"connection {self.config.name}: failed to open "
                 f"{self.config.role} on {self.config.address}: {exc}"
             ) from exc
-        self._socket = sock
+        with self._lock:
+            self._socket = sock
 
     def send(self, env: Envelope, timeout_ns: int = TIMEOUT_INFINITE) -> None:
         sock = self._require()
-        sock.send_timeout = ns_to_ms(timeout_ns)
-        try:
-            sock.send(self._topic + encode_envelope(env))
-        except pynng.Timeout as exc:
-            raise TimedOutError(
-                f"connection {self.config.name}: send timed out"
-            ) from exc
-        except Exception as exc:
-            raise TransportError(
-                f"connection {self.config.name}: nng send failed: {exc}"
-            ) from exc
+        with self._send_lock:
+            sock.send_timeout = ns_to_ms(timeout_ns)
+            try:
+                sock.send(self._topic + encode_envelope(env))
+            except pynng.Timeout as exc:
+                raise TimedOutError(
+                    f"connection {self.config.name}: send timed out"
+                ) from exc
+            except Exception as exc:
+                raise TransportError(
+                    f"connection {self.config.name}: nng send failed: {exc}"
+                ) from exc
 
     def receive(self, timeout_ns: int) -> Envelope:
         sock = self._require()
-        sock.recv_timeout = ns_to_ms(timeout_ns)
-        try:
-            raw = bytes(sock.recv())
-        except pynng.Timeout as exc:
-            raise TimedOutError(
-                f"connection {self.config.name}: receive timed out"
-            ) from exc
-        except Exception as exc:
-            raise TransportError(
-                f"connection {self.config.name}: nng recv failed: {exc}"
-            ) from exc
+        with self._recv_lock:
+            sock.recv_timeout = ns_to_ms(timeout_ns)
+            try:
+                raw = bytes(sock.recv())
+            except pynng.Timeout as exc:
+                raise TimedOutError(
+                    f"connection {self.config.name}: receive timed out"
+                ) from exc
+            except Exception as exc:
+                raise TransportError(
+                    f"connection {self.config.name}: nng recv failed: {exc}"
+                ) from exc
         if not raw.startswith(self._topic):
             raise TransportError(
                 f"connection {self.config.name}: frame topic mismatch"
@@ -243,15 +316,17 @@ class BusTransport(Transport):
                 f"connection {self.config.name}: failed to open bus on "
                 f"{self.config.address}: {exc}"
             ) from exc
-        self._socket = sock
+        with self._lock:
+            self._socket = sock
 
     def open_dial(self) -> None:
         """Join the bus as a dialer (for nodes that must not listen)."""
         self.close()
         try:
-            self._socket = pynng.Bus0(
-                dial=self.config.address, block_on_dial=False
-            )
+            with self._lock:
+                self._socket = pynng.Bus0(
+                    dial=self.config.address, block_on_dial=False
+                )
         except Exception as exc:
             raise TransportError(
                 f"connection {self.config.name}: failed to dial bus "
@@ -260,31 +335,33 @@ class BusTransport(Transport):
 
     def send(self, env: Envelope, timeout_ns: int = TIMEOUT_INFINITE) -> None:
         sock = self._require()
-        sock.send_timeout = ns_to_ms(timeout_ns)
-        try:
-            sock.send(encode_envelope(env))
-        except pynng.Timeout as exc:
-            raise TimedOutError(
-                f"connection {self.config.name}: send timed out"
-            ) from exc
-        except Exception as exc:
-            raise TransportError(
-                f"connection {self.config.name}: nng send failed: {exc}"
-            ) from exc
+        with self._send_lock:
+            sock.send_timeout = ns_to_ms(timeout_ns)
+            try:
+                sock.send(encode_envelope(env))
+            except pynng.Timeout as exc:
+                raise TimedOutError(
+                    f"connection {self.config.name}: send timed out"
+                ) from exc
+            except Exception as exc:
+                raise TransportError(
+                    f"connection {self.config.name}: nng send failed: {exc}"
+                ) from exc
 
     def receive(self, timeout_ns: int) -> Envelope:
         sock = self._require()
-        sock.recv_timeout = ns_to_ms(timeout_ns)
-        try:
-            raw = bytes(sock.recv())
-        except pynng.Timeout as exc:
-            raise TimedOutError(
-                f"connection {self.config.name}: receive timed out"
-            ) from exc
-        except Exception as exc:
-            raise TransportError(
-                f"connection {self.config.name}: nng recv failed: {exc}"
-            ) from exc
+        with self._recv_lock:
+            sock.recv_timeout = ns_to_ms(timeout_ns)
+            try:
+                raw = bytes(sock.recv())
+            except pynng.Timeout as exc:
+                raise TimedOutError(
+                    f"connection {self.config.name}: receive timed out"
+                ) from exc
+            except Exception as exc:
+                raise TransportError(
+                    f"connection {self.config.name}: nng recv failed: {exc}"
+                ) from exc
         try:
             return decode_envelope(raw)
         except ValueError as exc:

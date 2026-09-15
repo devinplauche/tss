@@ -1,4 +1,4 @@
-foreach(t envelope config lifecycle live conformance extended)
+foreach(t envelope config lifecycle live conformance extended threading)
     add_executable(face_tss_test_${t} test_${t}.c)
     target_include_directories(face_tss_test_${t} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -15,7 +15,7 @@ foreach(t envelope config lifecycle live conformance extended)
     if(t STREQUAL "live")
         target_link_libraries(face_tss_test_${t} PRIVATE nng)
     endif()
-    if(t STREQUAL "extended")
+    if(t STREQUAL "extended" OR t STREQUAL "threading")
         target_link_libraries(face_tss_test_${t} PRIVATE Threads::Threads)
     endif()
     add_test(NAME c-${t} COMMAND face_tss_test_${t})

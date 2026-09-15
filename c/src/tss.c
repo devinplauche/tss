@@ -24,6 +24,11 @@ typedef struct FACE_TSS_CONN {
     FACE_TSS_CONNECTION_CONFIG cfg;
     FACE_TSS_TRANSPORT *transport;
     int closed;
+    /* Reference count, guarded by the TSS lock. The connection table
+     * holds one reference; each operation that drops the TSS lock across
+     * blocking I/O holds another. The last release tears the connection
+     * down with no locks held (teardown_conn). */
+    int refcount;
     uint64_t send_seq;
     FACE_TSS_MESSAGE_CB cb;
     void *cb_user;
@@ -42,10 +47,18 @@ struct FACE_TSS {
     FACE_TSS_TRANSACTION_ID_TYPE next_txn;    /* assigned transaction IDs */
 #if defined(_WIN32)
     CRITICAL_SECTION lock;
+    CONDITION_VARIABLE zero_cond;
 #else
     pthread_mutex_t lock;
+    pthread_cond_t zero_cond;
 #endif
     int initialized;
+    /* destroy() sets destroying under the lock; afterwards every public
+     * entry point fails with NOT_AVAILABLE, in-flight blocking I/O is
+     * aborted, and destroy() waits on zero_cond until refcount (the
+     * number of operations currently running without the lock) drains. */
+    int destroying;
+    int refcount;
     FACE_TSS_CONFIG config;
     FACE_TSS_CONNECTION_ID_TYPE next_id;
     FACE_TSS_CONN **conns;      /* indexed by (id - 1), NULL when free */
@@ -67,8 +80,10 @@ static void lock_init(FACE_TSS *t)
 {
 #if defined(_WIN32)
     InitializeCriticalSection(&t->lock);
+    InitializeConditionVariable(&t->zero_cond);
 #else
     pthread_mutex_init(&t->lock, NULL);
+    pthread_cond_init(&t->zero_cond, NULL);
 #endif
 }
 
@@ -76,7 +91,9 @@ static void lock_fini(FACE_TSS *t)
 {
 #if defined(_WIN32)
     DeleteCriticalSection(&t->lock);
+    /* CONDITION_VARIABLE needs no destruction. */
 #else
+    pthread_cond_destroy(&t->zero_cond);
     pthread_mutex_destroy(&t->lock);
 #endif
 }
@@ -97,6 +114,84 @@ static void lock_drop(FACE_TSS *t)
 #else
     pthread_mutex_unlock(&t->lock);
 #endif
+}
+
+/* ------------------------------------------------------------------ */
+/* reference counting                                                 */
+/*                                                                    */
+/* Operations that block (send/receive/unregister) drop the TSS lock   */
+/* while they wait, so the connections they touch must stay alive      */
+/* across the unlocked window. Every helper below documents whether    */
+/* the caller holds the lock.                                         */
+/* ------------------------------------------------------------------ */
+
+/* Enter an operation that will drop the TSS lock across blocking I/O.
+ * On success the TSS lock is NOT held and the instance cannot be freed
+ * until tss_exit_io runs. Returns NOT_AVAILABLE when destroy() is in
+ * progress. */
+static FACE_TSS_RETURN_CODE tss_enter_io(FACE_TSS *tss)
+{
+    lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    tss->refcount++;
+    lock_drop(tss);
+    return FACE_TSS_RC_NO_ERROR;
+}
+
+/* Caller holds the TSS lock. */
+static void tss_exit_io_locked(FACE_TSS *tss)
+{
+    if (--tss->refcount == 0 && tss->destroying) {
+#if defined(_WIN32)
+        WakeConditionVariable(&tss->zero_cond);
+#else
+        pthread_cond_signal(&tss->zero_cond);
+#endif
+    }
+}
+
+/* Caller does NOT hold the TSS lock. */
+static void tss_exit_io(FACE_TSS *tss)
+{
+    lock_take(tss);
+    tss_exit_io_locked(tss);
+    lock_drop(tss);
+}
+
+/* Caller holds the TSS lock. */
+static void conn_ref(FACE_TSS_CONN *c)
+{
+    c->refcount++;
+}
+
+/* Caller holds the TSS lock. Drops one reference; returns 1 when the
+ * caller must run teardown_conn(c) with no locks held. While the
+ * instance is being destroyed, teardown is destroy()'s job. */
+static int conn_release_locked(FACE_TSS *tss, FACE_TSS_CONN *c)
+{
+    if (--c->refcount == 0 && c->closed && !tss->destroying)
+        return 1;
+    return 0;
+}
+
+/* Tear down a connection whose reference count reached zero. No TSS lock
+ * is held: transport_close joins the callback dispatch thread, and the
+ * dispatcher may be blocked acquiring the TSS lock, so joining under it
+ * would deadlock. The join also guarantees no dispatch is in flight
+ * when the callback context and user data are released. */
+static void teardown_conn(FACE_TSS_CONN *c)
+{
+    void *ctx = c->cb_ctx;
+    void *user = c->cb_user;
+    void (*user_fini)(void *) = c->cb_user_fini;
+    face_tss_transport_close(c->transport);
+    free(ctx);
+    if (user_fini)
+        user_fini(user);
+    free(c);
 }
 
 static int64_t now_ns(void)
@@ -209,41 +304,61 @@ FACE_TSS *face_tss_create(const char *instance_name)
     return t;
 }
 
-static void destroy_conn(FACE_TSS_CONN *c)
-{
-    if (!c)
-        return;
-    c->closed = 1;
-    c->cb = NULL;
-    face_tss_transport_close(c->transport);
-    free(c->cb_ctx);
-    c->cb_ctx = NULL;
-    if (c->cb_user_fini) {
-        c->cb_user_fini(c->cb_user);
-        c->cb_user_fini = NULL;
-    }
-    c->cb_user = NULL;
-    free(c);
-}
+/* face_tss_destroy / face_tss_destroy_connection replace this; see
+ * teardown_conn above. Connections are removed from the table under the
+ * TSS lock and torn down once their reference count drains, with no
+ * locks held across the callback-thread join. */
 
 void face_tss_destroy(FACE_TSS *tss)
 {
-    size_t i;
+    FACE_TSS_CONN **conns;
+    size_t cap, i;
+    FACE_TSS_QOS *qos;
     if (!tss)
         return;
     lock_take(tss);
-    for (i = 0; i < tss->conns_cap; i++) {
-        destroy_conn(tss->conns[i]);
-        tss->conns[i] = NULL;
-    }
-    free(tss->conns);
+    tss->destroying = 1;
+    /* Steal the connection table so no new operation can find a
+     * connection; operations already past tss_enter_io hold their own
+     * references and keep the instance alive via tss->refcount. */
+    conns = tss->conns;
+    cap = tss->conns_cap;
     tss->conns = NULL;
     tss->conns_cap = 0;
-    face_tss_config_fini(&tss->config);
-    face_tss_qos_destroy(tss->qos);
-    tss->qos = NULL;
+    tss->conns_open = 0;
     tss->initialized = 0;
+    face_tss_config_fini(&tss->config);
     lock_drop(tss);
+    /* Abort in-flight blocking I/O with no locks held: closing the
+     * sockets makes nng_sendmsg/nng_recvmsg return promptly, so the
+     * reference count drains. The callback-thread join inside the
+     * shutdown cannot deadlock against a dispatcher blocked on the TSS
+     * lock, because the lock is not held here. */
+    for (i = 0; i < cap; i++) {
+        FACE_TSS_CONN *c = conns[i];
+        if (!c)
+            continue;
+        c->closed = 1;
+        face_tss_transport_shutdown(c->transport);
+    }
+    /* Wait for in-flight operations to finish. */
+    lock_take(tss);
+    while (tss->refcount > 0) {
+#if defined(_WIN32)
+        SleepConditionVariableCS(&tss->zero_cond, &tss->lock, INFINITE);
+#else
+        pthread_cond_wait(&tss->zero_cond, &tss->lock);
+#endif
+    }
+    qos = tss->qos;
+    tss->qos = NULL;
+    lock_drop(tss);
+    for (i = 0; i < cap; i++) {
+        if (conns[i])
+            teardown_conn(conns[i]);
+    }
+    free(conns);
+    face_tss_qos_destroy(qos);
     lock_fini(tss);
     free(tss);
 }
@@ -259,6 +374,10 @@ static FACE_TSS_RETURN_CODE initialize_with_config(
     if (!tss || !config)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_NO_ACTION;
@@ -317,6 +436,10 @@ FACE_TSS_RETURN_CODE face_tss_set_reference(
     if (strcmp(interface_name, FACE_TSS_CONFIGURATION_INTERFACE_NAME) != 0)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_INVALID_MODE; /* steady state */
@@ -367,7 +490,7 @@ FACE_TSS_UID_TYPE face_tss_source_id(FACE_TSS *tss)
     if (!tss)
         return 0;
     lock_take(tss);
-    v = tss->source_id;
+    v = tss->destroying ? 0 : tss->source_id;
     lock_drop(tss);
     return v;
 }
@@ -377,6 +500,10 @@ FACE_TSS_RETURN_CODE face_tss_stats(FACE_TSS *tss, FACE_TSS_STATS *out)
     if (!tss || !out)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     *out = tss->stats;
     lock_drop(tss);
     return FACE_TSS_RC_NO_ERROR;
@@ -395,6 +522,10 @@ FACE_TSS_RETURN_CODE face_tss_priv_typed_register(
         tsupport->value_size == 0)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     for (i = 0; i < tss->ntypes; i++) {
         if (strcmp(tss->types[i].type_name, tsupport->type_name) == 0) {
             lock_drop(tss);
@@ -418,6 +549,10 @@ const FACE_TSS_TYPE_SUPPORT *face_tss_priv_typed_lookup(
     if (!tss || !type_name)
         return NULL;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return NULL;
+    }
     for (i = 0; i < tss->ntypes; i++) {
         if (strcmp(tss->types[i].type_name, type_name) == 0) {
             found = &tss->types[i];
@@ -465,6 +600,10 @@ FACE_TSS_RETURN_CODE face_tss_create_connection(
     if (!tss || !name || !connection_id || !max_message_size)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (!tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
@@ -478,9 +617,9 @@ FACE_TSS_RETURN_CODE face_tss_create_connection(
         lock_drop(tss);
         return FACE_TSS_RC_INVALID_PARAM;
     }
-    /* Open the socket before taking a table slot (may block briefly on
-     * dial; done under lock for table consistency - matches the Python
-     * implementation's locking discipline). */
+    /* Open the socket under the lock for table consistency. The dial is
+     * non-blocking and listen() does not block, so this never waits on
+     * the network; the blocking send/receive paths below drop the lock. */
     rc = face_tss_transport_open(cfg, &tr);
     if (rc != FACE_TSS_RC_NO_ERROR) {
         lock_drop(tss);
@@ -494,6 +633,7 @@ FACE_TSS_RETURN_CODE face_tss_create_connection(
     }
     c->cfg = *cfg;
     c->transport = tr;
+    c->refcount = 1; /* the table's reference */
     idx = (size_t)(tss->next_id - 1);
     if (idx >= tss->conns_cap) {
         size_t want = tss->conns_cap ? tss->conns_cap * 2 : 8;
@@ -524,11 +664,18 @@ FACE_TSS_RETURN_CODE face_tss_destroy_connection(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id)
 {
     size_t idx;
+    FACE_TSS_CONN *c;
+    FACE_TSS_TRANSPORT *tr;
+    int teardown;
     if (!tss)
         return FACE_TSS_RC_INVALID_PARAM;
     if (connection_id == FACE_TSS_CONNECTION_ID_INVALID)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (!tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
@@ -538,13 +685,26 @@ FACE_TSS_RETURN_CODE face_tss_destroy_connection(
         lock_drop(tss);
         return FACE_TSS_RC_NO_ACTION;
     }
-    destroy_conn(tss->conns[idx]);
+    /* Remove from the table so no new operation can find it; in-flight
+     * operations hold their own references. New dispatches observe
+     * cb == NULL and drop. */
+    c = tss->conns[idx];
     tss->conns[idx] = NULL;
     tss->conns_open--;
+    c->closed = 1;
+    c->cb = NULL;
+    tr = c->transport;
     /* Drop any QoS policies so the (capped) policy table cannot fill
      * with entries for dead connections. */
     face_tss_qos_clear_policies(tss->qos, connection_id);
+    teardown = conn_release_locked(tss, c); /* drop the table's reference */
     lock_drop(tss);
+    /* Abort in-flight blocking I/O and join the callback thread with no
+     * locks held (see teardown_conn). Teardown is deferred when an
+     * operation still holds a reference. */
+    face_tss_transport_shutdown(tr);
+    if (teardown)
+        teardown_conn(c);
     return FACE_TSS_RC_NO_ERROR;
 }
 
@@ -562,6 +722,10 @@ FACE_TSS_RETURN_CODE face_tss_set_qos_policy(
     if (kind == FACE_TSS_QOS_MAX_AGE)
         kind = FACE_TSS_QOS_STALENESS; /* documented alias */
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (!tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
@@ -585,6 +749,10 @@ FACE_TSS_RETURN_CODE face_tss_get_qos_policy(
     if (kind == FACE_TSS_QOS_MAX_AGE)
         kind = FACE_TSS_QOS_STALENESS; /* documented alias */
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (!tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
@@ -623,56 +791,92 @@ FACE_TSS_RETURN_CODE face_tss_priv_send_guid(
     const uint8_t *payload, size_t payload_len)
 {
     FACE_TSS_CONN *c;
+    FACE_TSS_TRANSPORT *tr;
+    FACE_TSS_CONNECTION_CONFIG cfg;
     FACE_TSS_ENVELOPE env;
+    FACE_TSS_UID_TYPE source_id, instance_uid;
+    uint64_t seq;
     FACE_TSS_RETURN_CODE rc;
+    int teardown;
     if (!tss || !transaction_id)
         return FACE_TSS_RC_INVALID_PARAM;
     if (payload_len > 0 && !payload)
         return FACE_TSS_RC_INVALID_PARAM;
+    rc = tss_enter_io(tss);
+    if (rc != FACE_TSS_RC_NO_ERROR)
+        return rc;
     lock_take(tss);
     if (!tss->initialized) {
         lock_drop(tss);
-        return FACE_TSS_RC_NOT_AVAILABLE;
+        goto io_exit_not_available;
     }
     c = find_open(tss, connection_id);
     if (!c) {
         lock_drop(tss);
-        return FACE_TSS_RC_CONNECTION_CLOSED;
+        goto io_exit_closed;
     }
     if (!can_send(c)) {
         lock_drop(tss);
-        return FACE_TSS_RC_INVALID_MODE;
+        goto io_exit_invalid_mode;
     }
     if ((FACE_TSS_MESSAGE_SIZE_TYPE)payload_len > c->cfg.max_message_size ||
         payload_len > (size_t)INT32_MAX) {
         lock_drop(tss);
-        return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
+        goto io_exit_too_small;
     }
     /* inout transaction_id: assign one when the caller passes unspecified. */
     if (*transaction_id == FACE_TSS_TRANSACTION_ID_UNSPECIFIED)
         *transaction_id = tss->next_txn++;
-    c->send_seq++;
+    seq = ++c->send_seq;
+    source_id = tss->source_id;
+    instance_uid = tss->next_instance_uid++;
+    /* Snapshot everything the blocking call needs; the connection stays
+     * alive across the unlocked window via the reference. */
+    cfg = c->cfg;
+    tr = c->transport;
+    conn_ref(c);
+    lock_drop(tss);
+
     face_tss_envelope_init(&env);
-    memcpy(env.connection_name, c->cfg.name, sizeof(env.connection_name));
+    memcpy(env.connection_name, cfg.name, sizeof(env.connection_name));
     env.connection_name[sizeof(env.connection_name) - 1] = '\0';
     env.transaction_id = *transaction_id;
-    env.source_id = tss->source_id;
-    env.sequence_number = c->send_seq;
+    env.source_id = source_id;
+    env.sequence_number = seq;
     env.timestamp_ns = now_ns();
-    env.instance_uid = tss->next_instance_uid++;
+    env.instance_uid = instance_uid;
     env.message_guid = message_guid;
     /* borrow caller bytes: encode copies into the builder, no copy here */
     env.payload = (uint8_t *)payload;
     env.payload_len = payload_len;
-    rc = face_tss_transport_send(c->transport, &env, timeout_ns);
+    rc = face_tss_transport_send(tr, &env, timeout_ns);
     env.payload = NULL; /* not owned */
     env.payload_len = 0;
+
+    lock_take(tss);
     if (rc == FACE_TSS_RC_NO_ERROR)
         tss->stats.sent++;
     else
         tss->stats.send_errors++;
+    teardown = conn_release_locked(tss, c);
+    tss_exit_io_locked(tss);
     lock_drop(tss);
+    if (teardown)
+        teardown_conn(c);
     return rc;
+
+io_exit_not_available:
+    tss_exit_io(tss);
+    return FACE_TSS_RC_NOT_AVAILABLE;
+io_exit_closed:
+    tss_exit_io(tss);
+    return FACE_TSS_RC_CONNECTION_CLOSED;
+io_exit_invalid_mode:
+    tss_exit_io(tss);
+    return FACE_TSS_RC_INVALID_MODE;
+io_exit_too_small:
+    tss_exit_io(tss);
+    return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
 }
 
 FACE_TSS_RETURN_CODE face_tss_send_message(
@@ -728,7 +932,10 @@ static void qos_fill(FACE_TSS_QOS_EVENT *qos, int64_t timestamp_ns)
 
 /* Shared receive core: validate, block on the transport, enforce
  * min_message_size. Returns the envelope; caller must fini it. The TSS
- * lock is held for the transport call (nng sockets are thread-safe). */
+ * lock is NOT held across the blocking transport call, so one thread's
+ * receive never stalls the rest of the instance; the connection is kept
+ * alive by a reference, and stats/QoS are updated under the re-taken
+ * lock. */
 static FACE_TSS_RETURN_CODE receive_envelope(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id,
     FACE_TIMEOUT_TYPE timeout_ns, size_t min_message_size,
@@ -738,58 +945,71 @@ static FACE_TSS_RETURN_CODE receive_envelope(
     FACE_TSS_CONN *c;
     FACE_TSS_TRANSPORT *tr;
     FACE_TSS_RETURN_CODE rc;
+    int teardown;
     if (!tss || !transaction_id || !env)
         return FACE_TSS_RC_INVALID_PARAM;
+    rc = tss_enter_io(tss);
+    if (rc != FACE_TSS_RC_NO_ERROR)
+        return rc;
     lock_take(tss);
     if (!tss->initialized) {
         lock_drop(tss);
+        tss_exit_io(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
     }
     c = find_open(tss, connection_id);
     if (!c) {
         lock_drop(tss);
+        tss_exit_io(tss);
         return FACE_TSS_RC_CONNECTION_CLOSED;
     }
     if (!can_receive(c)) {
         lock_drop(tss);
+        tss_exit_io(tss);
         return FACE_TSS_RC_INVALID_MODE;
     }
     tr = c->transport;
+    conn_ref(c);
+    lock_drop(tss);
+
     face_tss_envelope_init(env);
     rc = face_tss_transport_receive(tr, timeout_ns, env);
+
+    lock_take(tss);
     if (rc == FACE_TSS_RC_TIMED_OUT) {
         tss->stats.receive_timeouts++;
-        lock_drop(tss);
-        return rc;
-    }
-    if (rc != FACE_TSS_RC_NO_ERROR) {
-        lock_drop(tss);
-        return rc;
-    }
-    if (env->payload_len < min_message_size) {
-        face_tss_envelope_fini(env);
-        lock_drop(tss);
-        return FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
-    }
-    /* Staleness enforcement: discard messages older than the
-     * connection's QoS staleness threshold and report MESSAGE_STALE.
-     * No policy -> NO_ACTION -> delivered normally. */
-    {
-        int64_t age = now_ns() - (int64_t)env->timestamp_ns;
-        FACE_TSS_RETURN_CODE qrc;
-        if (age < 0)
-            age = 0;
-        qrc = face_tss_qos_check_staleness(tss->qos, connection_id, age);
-        if (qrc == FACE_TSS_RC_MESSAGE_STALE) {
-            face_tss_envelope_fini(env);
-            tss->stats.stale_dropped++;
-            lock_drop(tss);
-            return FACE_TSS_RC_MESSAGE_STALE;
+    } else if (rc == FACE_TSS_RC_NO_ERROR) {
+        if (env->payload_len < min_message_size) {
+            rc = FACE_TSS_RC_DATA_BUFFER_TOO_SMALL;
+        } else {
+            /* Staleness enforcement: discard messages older than the
+             * connection's QoS staleness threshold and report
+             * MESSAGE_STALE. No policy -> NO_ACTION -> delivered
+             * normally. The QoS manager is only touched under the TSS
+             * lock, and destroy() cannot free it while this operation
+             * holds a TSS reference. */
+            int64_t age = now_ns() - (int64_t)env->timestamp_ns;
+            FACE_TSS_RETURN_CODE qrc;
+            if (age < 0)
+                age = 0;
+            qrc = face_tss_qos_check_staleness(tss->qos, connection_id,
+                                              age);
+            if (qrc == FACE_TSS_RC_MESSAGE_STALE) {
+                tss->stats.stale_dropped++;
+                rc = FACE_TSS_RC_MESSAGE_STALE;
+            } else {
+                tss->stats.received++;
+            }
         }
     }
-    tss->stats.received++;
+    if (rc != FACE_TSS_RC_NO_ERROR)
+        face_tss_envelope_fini(env);
+    teardown = conn_release_locked(tss, c);
+    tss_exit_io_locked(tss);
     lock_drop(tss);
-    return FACE_TSS_RC_NO_ERROR;
+    if (teardown)
+        teardown_conn(c);
+    return rc;
 }
 
 FACE_TSS_RETURN_CODE face_tss_receive_message(
@@ -938,6 +1158,10 @@ FACE_TSS_RETURN_CODE face_tss_priv_register_callback_ex(
     if (!tss || !cb)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (!tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
@@ -990,9 +1214,18 @@ FACE_TSS_RETURN_CODE face_tss_unregister_callback(
     FACE_TSS *tss, FACE_TSS_CONNECTION_ID_TYPE connection_id)
 {
     FACE_TSS_CONN *c;
+    FACE_TSS_TRANSPORT *tr;
+    void *ctx;
+    void *user;
+    void (*user_fini)(void *);
+    int teardown;
     if (!tss)
         return FACE_TSS_RC_INVALID_PARAM;
     lock_take(tss);
+    if (tss->destroying) {
+        lock_drop(tss);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (!tss->initialized) {
         lock_drop(tss);
         return FACE_TSS_RC_NOT_AVAILABLE;
@@ -1006,15 +1239,34 @@ FACE_TSS_RETURN_CODE face_tss_unregister_callback(
         lock_drop(tss);
         return FACE_TSS_RC_NO_ACTION;
     }
-    face_tss_transport_callback_stop(c->transport);
+    /* Detach first: new dispatches observe cb == NULL and drop. Hold a
+     * connection reference and a TSS reference across the join below so
+     * a concurrent destroy_connection/destroy cannot free the transport
+     * or the instance out from under it. */
     c->cb = NULL;
-    if (c->cb_user_fini) {
-        c->cb_user_fini(c->cb_user);
-        c->cb_user_fini = NULL;
-    }
-    c->cb_user = NULL;
-    free(c->cb_ctx);
+    ctx = c->cb_ctx;
     c->cb_ctx = NULL;
+    user = c->cb_user;
+    c->cb_user = NULL;
+    user_fini = c->cb_user_fini;
+    c->cb_user_fini = NULL;
+    tr = c->transport;
+    conn_ref(c);
+    tss->refcount++;
     lock_drop(tss);
+    /* Join the dispatch thread with no TSS lock held: a dispatch in
+     * progress may be blocked acquiring it, so joining under it would
+     * deadlock. After the join, no dispatch is in flight, so the
+     * context and user data are safe to release. */
+    face_tss_transport_callback_stop(tr);
+    free(ctx);
+    if (user_fini)
+        user_fini(user);
+    lock_take(tss);
+    teardown = conn_release_locked(tss, c);
+    tss_exit_io_locked(tss);
+    lock_drop(tss);
+    if (teardown)
+        teardown_conn(c);
     return FACE_TSS_RC_NO_ERROR;
 }

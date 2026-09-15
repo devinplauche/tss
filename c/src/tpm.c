@@ -39,12 +39,20 @@ struct FACE_TSS_TPM {
     FACE_TSS_TPM_EVENT_TYPE status;
     tpm_channel_t channels[TPM_MAX_CHANNELS];
     FACE_TSS_TPM_CHANNEL_ID_TYPE next_channel_id;
+    /* destroy() sets destroying under the lock; afterwards every entry
+     * point fails with NOT_AVAILABLE, blocked waiters are woken, and
+     * destroy() waits until waiters (threads inside a cond_wait) drains
+     * before freeing anything. */
+    int destroying;
+    int waiters;
 #if defined(_WIN32)
     CRITICAL_SECTION lock;
     CONDITION_VARIABLE data_cond;
+    CONDITION_VARIABLE destroy_cond;
 #else
     pthread_mutex_t lock;
     pthread_cond_t data_cond;
+    pthread_cond_t destroy_cond;
 #endif
 };
 
@@ -69,10 +77,12 @@ static int64_t tpm_now_ns(void)
 static void tpm_lock(FACE_TSS_TPM *tpm) { EnterCriticalSection(&tpm->lock); }
 static void tpm_unlock(FACE_TSS_TPM *tpm) { LeaveCriticalSection(&tpm->lock); }
 /* Wait for a signal or until deadline_ns (monotonic). infinite: wait forever.
- * Returns 1 if signaled, 0 on timeout. */
+ * Returns 1 if signaled, 0 on timeout. The waiter is counted in
+ * tpm->waiters so destroy() can wait for it before freeing anything. */
 static int tpm_wait_until(FACE_TSS_TPM *tpm, int64_t deadline_ns, int infinite)
 {
     DWORD ms;
+    int signaled;
     if (infinite)
         ms = INFINITE;
     else {
@@ -81,34 +91,61 @@ static int tpm_wait_until(FACE_TSS_TPM *tpm, int64_t deadline_ns, int infinite)
             return 0;
         ms = (DWORD)(rem / 1000000LL);
     }
-    return SleepConditionVariableCS(&tpm->data_cond, &tpm->lock, ms) ? 1 : 0;
+    tpm->waiters++;
+    signaled =
+        SleepConditionVariableCS(&tpm->data_cond, &tpm->lock, ms) ? 1 : 0;
+    tpm->waiters--;
+    if (tpm->destroying && tpm->waiters == 0)
+        WakeConditionVariable(&tpm->destroy_cond);
+    return signaled;
+}
+static void tpm_broadcast_data(FACE_TSS_TPM *tpm)
+{
+    WakeAllConditionVariable(&tpm->data_cond);
 }
 #else
 static void tpm_lock(FACE_TSS_TPM *tpm) { pthread_mutex_lock(&tpm->lock); }
 static void tpm_unlock(FACE_TSS_TPM *tpm) { pthread_mutex_unlock(&tpm->lock); }
+/* Wait for a signal or until deadline_ns (monotonic). infinite: wait forever.
+ * Returns 1 if signaled, 0 on timeout. The waiter is counted in
+ * tpm->waiters so destroy() can wait for it before freeing anything. */
 static int tpm_wait_until(FACE_TSS_TPM *tpm, int64_t deadline_ns, int infinite)
 {
-    if (infinite)
-        return pthread_cond_wait(&tpm->data_cond, &tpm->lock) == 0;
-    /* pthread_cond_timedwait takes an absolute CLOCK_REALTIME deadline. */
-    struct timespec now_rt, abs_ts;
-    int64_t rem = deadline_ns - tpm_now_ns();
-    int rv;
-    if (rem <= 0)
-        return 0;
-    clock_gettime(CLOCK_REALTIME, &now_rt);
-    abs_ts.tv_sec =
-        now_rt.tv_sec + (time_t)(rem / 1000000000LL);
-    abs_ts.tv_nsec =
-        now_rt.tv_nsec + (long)(rem % 1000000000LL);
-    if (abs_ts.tv_nsec >= 1000000000L) {
-        abs_ts.tv_sec += 1;
-        abs_ts.tv_nsec -= 1000000000L;
+    /* data_cond uses CLOCK_MONOTONIC (see create), so the monotonic
+     * deadline converts directly to an absolute timespec. */
+    struct timespec abs_ts;
+    int rv, signaled;
+    if (infinite) {
+        tpm->waiters++;
+        rv = pthread_cond_wait(&tpm->data_cond, &tpm->lock);
+        tpm->waiters--;
+        signaled = (rv == 0);
+    } else {
+        int64_t rem = deadline_ns - tpm_now_ns();
+        if (rem <= 0)
+            return 0;
+        abs_ts.tv_sec = (time_t)(deadline_ns / 1000000000LL);
+        abs_ts.tv_nsec = (long)(deadline_ns % 1000000000LL);
+        tpm->waiters++;
+        rv = pthread_cond_timedwait(&tpm->data_cond, &tpm->lock, &abs_ts);
+        tpm->waiters--;
+        signaled = (rv == 0);
     }
-    rv = pthread_cond_timedwait(&tpm->data_cond, &tpm->lock, &abs_ts);
-    return rv == 0;
+    if (tpm->destroying && tpm->waiters == 0)
+        pthread_cond_signal(&tpm->destroy_cond);
+    return signaled;
+}
+static void tpm_broadcast_data(FACE_TSS_TPM *tpm)
+{
+    pthread_cond_broadcast(&tpm->data_cond);
 }
 #endif
+
+/* Caller holds the lock. Returns 1 when the TPM is being destroyed. */
+static int tpm_destroying(FACE_TSS_TPM *tpm)
+{
+    return tpm->destroying;
+}
 
 FACE_TSS_TPM *face_tss_tpm_create(const char *name)
 {
@@ -123,9 +160,18 @@ FACE_TSS_TPM *face_tss_tpm_create(const char *name)
 #if defined(_WIN32)
     InitializeCriticalSection(&tpm->lock);
     InitializeConditionVariable(&tpm->data_cond);
+    InitializeConditionVariable(&tpm->destroy_cond);
 #else
     pthread_mutex_init(&tpm->lock, NULL);
-    pthread_cond_init(&tpm->data_cond, NULL);
+    {
+        /* Monotonic clock: immune to wall-clock jumps. */
+        pthread_condattr_t attr;
+        pthread_condattr_init(&attr);
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+        pthread_cond_init(&tpm->data_cond, &attr);
+        pthread_condattr_destroy(&attr);
+    }
+    pthread_cond_init(&tpm->destroy_cond, NULL);
 #endif
     return tpm;
 }
@@ -135,6 +181,19 @@ void face_tss_tpm_destroy(FACE_TSS_TPM *tpm)
     int i;
     if (!tpm)
         return;
+    tpm_lock(tpm);
+    tpm->destroying = 1;
+    /* Wake every blocked waiter; each one decrements tpm->waiters on wake
+     * and the last one signals destroy_cond. */
+    tpm_broadcast_data(tpm);
+    while (tpm->waiters > 0) {
+#if defined(_WIN32)
+        SleepConditionVariableCS(&tpm->destroy_cond, &tpm->lock, INFINITE);
+#else
+        pthread_cond_wait(&tpm->destroy_cond, &tpm->lock);
+#endif
+    }
+    tpm_unlock(tpm);
     for (i = 0; i < TPM_MAX_CHANNELS; i++) {
         free(tpm->channels[i].pending_msg);
     }
@@ -142,6 +201,7 @@ void face_tss_tpm_destroy(FACE_TSS_TPM *tpm)
     DeleteCriticalSection(&tpm->lock);
 #else
     pthread_cond_destroy(&tpm->data_cond);
+    pthread_cond_destroy(&tpm->destroy_cond);
     pthread_mutex_destroy(&tpm->lock);
 #endif
     free(tpm);
@@ -153,10 +213,18 @@ FACE_TSS_RETURN_CODE face_tss_tpm_initialize(
     if (!tpm)
         return FACE_TSS_RC_INVALID_PARAM;
     (void)configuration_resource;
-    if (tpm->initialized)
+    tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    if (tpm->initialized) {
+        tpm_unlock(tpm);
         return FACE_TSS_RC_NO_ACTION;
+    }
     tpm->initialized = 1;
     tpm->status = FACE_TSS_TPM_INIT_COMPLETE;
+    tpm_unlock(tpm);
     return FACE_TSS_RC_NO_ERROR;
 }
 
@@ -182,8 +250,6 @@ FACE_TSS_RETURN_CODE face_tss_tpm_open_channel(
     int i;
     if (!tpm || !channel_id_out)
         return FACE_TSS_RC_INVALID_PARAM;
-    if (!tpm->initialized)
-        return FACE_TSS_RC_NOT_AVAILABLE;
     if (!endpoint_name)
         return FACE_TSS_RC_INVALID_PARAM;
     (void)transport_config;
@@ -192,6 +258,14 @@ FACE_TSS_RETURN_CODE face_tss_tpm_open_channel(
     (void)security_config_len;
 
     tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    if (!tpm->initialized) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     if (tpm->state == FACE_TSS_TPM_STATE_SHUTDOWN) {
         tpm_unlock(tpm);
         return FACE_TSS_RC_INVALID_MODE;
@@ -221,6 +295,10 @@ FACE_TSS_RETURN_CODE face_tss_tpm_close_channel(
     if (!tpm->initialized)
         return FACE_TSS_RC_NOT_AVAILABLE;
     tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     ch = find_channel(tpm, channel_id);
     if (!ch) {
         tpm_unlock(tpm);
@@ -234,11 +312,7 @@ FACE_TSS_RETURN_CODE face_tss_tpm_close_channel(
     ch->cb_registered = 0;
     /* Wake any thread blocked in is_data_available/read_from_transport so it
      * re-scans and observes the closed channel. */
-#if defined(_WIN32)
-    WakeAllConditionVariable(&tpm->data_cond);
-#else
-    pthread_cond_broadcast(&tpm->data_cond);
-#endif
+    tpm_broadcast_data(tpm);
     tpm_unlock(tpm);
     return FACE_TSS_RC_NO_ERROR;
 }
@@ -266,13 +340,13 @@ FACE_TSS_RETURN_CODE face_tss_tpm_request_state_change(
         return FACE_TSS_RC_INVALID_PARAM;
     }
     tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     tpm->state = new_state;
     /* Wake blocked waiters so they observe the new state. */
-#if defined(_WIN32)
-    WakeAllConditionVariable(&tpm->data_cond);
-#else
-    pthread_cond_broadcast(&tpm->data_cond);
-#endif
+    tpm_broadcast_data(tpm);
     tpm_unlock(tpm);
     return FACE_TSS_RC_NO_ERROR;
 }
@@ -304,6 +378,10 @@ FACE_TSS_RETURN_CODE face_tss_tpm_is_data_available(
     }
 
     tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     for (;;) {
         n = 0;
         for (i = 0; i < channel_count && n < capacity; i++) {
@@ -315,24 +393,39 @@ FACE_TSS_RETURN_CODE face_tss_tpm_is_data_available(
         if (n > 0)
             break;
         /* Nothing available yet. */
+        if (tpm_destroying(tpm))
+            break;
         if (!infinite && tpm_now_ns() >= deadline_ns)
             break;
         /* Spurious wakeups are harmless: the loop re-scans. */
         tpm_wait_until(tpm, deadline_ns, infinite);
     }
-    tpm_unlock(tpm);
-    *available_count_inout = n;
-    return FACE_TSS_RC_NO_ERROR;
+    {
+        int gone = tpm_destroying(tpm);
+        tpm_unlock(tpm);
+        *available_count_inout = n;
+        return gone ? FACE_TSS_RC_NOT_AVAILABLE : FACE_TSS_RC_NO_ERROR;
+    }
 }
 
 FACE_TSS_RETURN_CODE face_tss_tpm_get_status(
     FACE_TSS_TPM *tpm, FACE_TSS_TPM_EVENT_TYPE *status_out)
 {
+    FACE_TSS_TPM_EVENT_TYPE status;
     if (!tpm || !status_out)
         return FACE_TSS_RC_INVALID_PARAM;
-    if (!tpm->initialized)
+    tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
         return FACE_TSS_RC_NOT_AVAILABLE;
-    *status_out = tpm->status;
+    }
+    if (!tpm->initialized) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
+    status = tpm->status;
+    tpm_unlock(tpm);
+    *status_out = status;
     return FACE_TSS_RC_NO_ERROR;
 }
 
@@ -359,6 +452,10 @@ FACE_TSS_RETURN_CODE face_tss_tpm_read_from_transport(
     }
 
     tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     for (;;) {
         ch = find_channel(tpm, channel_id);
         if (!ch) {
@@ -382,6 +479,10 @@ FACE_TSS_RETURN_CODE face_tss_tpm_read_from_transport(
                 ch->pending_len = 0;
                 rc = FACE_TSS_RC_NO_ERROR;
             }
+            break;
+        }
+        if (tpm_destroying(tpm)) {
+            rc = FACE_TSS_RC_NOT_AVAILABLE;
             break;
         }
         if (!infinite && tpm_now_ns() >= deadline_ns)
@@ -412,6 +513,10 @@ FACE_TSS_RETURN_CODE face_tss_tpm_write_to_transport(
     if (!tpm->initialized)
         return FACE_TSS_RC_NOT_AVAILABLE;
     tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     ch = find_channel(tpm, channel_id);
     if (!ch) {
         tpm_unlock(tpm);
@@ -471,21 +576,33 @@ FACE_TSS_RETURN_CODE face_tss_tpm_register_callback(
     void *user)
 {
     tpm_channel_t *ch;
+    FACE_TSS_RETURN_CODE rc;
     if (!tpm)
         return FACE_TSS_RC_INVALID_PARAM;
     if (!tpm->initialized)
         return FACE_TSS_RC_NOT_AVAILABLE;
+    tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     ch = find_channel(tpm, channel_id);
-    if (!ch)
+    if (!ch) {
+        tpm_unlock(tpm);
         return FACE_TSS_RC_INVALID_PARAM;
-    if (ch->cb_registered)
+    }
+    if (ch->cb_registered) {
+        tpm_unlock(tpm);
         return FACE_TSS_RC_NO_ACTION;
+    }
     ch->data_cb = data_cb;
     ch->event_cb = event_cb;
     ch->cb_user = user;
     ch->cb_kind = kind;
     ch->cb_registered = 1;
-    return FACE_TSS_RC_NO_ERROR;
+    rc = FACE_TSS_RC_NO_ERROR;
+    tpm_unlock(tpm);
+    return rc;
 }
 
 FACE_TSS_RETURN_CODE face_tss_tpm_unregister_callback(
@@ -493,18 +610,30 @@ FACE_TSS_RETURN_CODE face_tss_tpm_unregister_callback(
     FACE_TSS_TPM_CALLBACK_KIND kind)
 {
     tpm_channel_t *ch;
+    FACE_TSS_RETURN_CODE rc;
     if (!tpm)
         return FACE_TSS_RC_INVALID_PARAM;
     if (!tpm->initialized)
         return FACE_TSS_RC_NOT_AVAILABLE;
+    tpm_lock(tpm);
+    if (tpm_destroying(tpm)) {
+        tpm_unlock(tpm);
+        return FACE_TSS_RC_NOT_AVAILABLE;
+    }
     ch = find_channel(tpm, channel_id);
-    if (!ch)
+    if (!ch) {
+        tpm_unlock(tpm);
         return FACE_TSS_RC_INVALID_PARAM;
+    }
     (void)kind;
-    if (!ch->cb_registered)
+    if (!ch->cb_registered) {
+        tpm_unlock(tpm);
         return FACE_TSS_RC_NO_ACTION;
+    }
     ch->cb_registered = 0;
     ch->data_cb = NULL;
     ch->event_cb = NULL;
-    return FACE_TSS_RC_NO_ERROR;
+    rc = FACE_TSS_RC_NO_ERROR;
+    tpm_unlock(tpm);
+    return rc;
 }

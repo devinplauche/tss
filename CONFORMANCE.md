@@ -238,8 +238,27 @@ Xvfb, so File → Projects → Import could not be reached to load the
 - **Late subscriber**: fixed — dials are non-blocking with background retry,
   so start order no longer matters for connectivity. Messages sent before
   the subscription propagates are still dropped (inherent pub/sub).
-- **Threading**: callback stop/destroy locking follows the original design;
-  not audited against FACE threading requirements.
+- **Threading**: audited 2026-09-15 (no normative threading requirement was
+  found in the local FACE CTS 3.2.3 IDL; this is an implementation
+  concurrency audit). The TSS instance lock is never held across blocking
+  transport I/O; per-connection refcounts keep connections and the
+  instance alive until in-flight operations finish; destroy/unregister
+  join callback threads with no locks held; destroying a connection or
+  the instance aborts blocked sends/receives by closing the socket;
+  a data callback may unregister its own connection (self-stop defers
+  the free to the dispatch loop's exit); TPM destroy wakes blocked
+  readers via broadcast and waits for waiters to drain. Per-call send
+  and receive timeouts are serialized per direction (nng timeouts are
+  per-socket). Verified by new `c-threading` CTest suite and
+  `tests/test_threading.py` (Python): blocked receive does not stall
+  the instance, destroy interrupts blocked I/O, unregister mid-stream
+  and self-unregister do not deadlock, unregister leaves the connection
+  usable for re-registration, concurrent receives keep their own
+  timeouts, TPM destroy wakes a blocked reader. Full CTest suite is
+  clean under ASan+UBSan and ThreadSanitizer (the two TSan warnings
+  found during the audit were data races in test-only callback
+  counters, fixed; TSan needs `setarch -R` on this machine because of
+  a shadow-memory mapping conflict with ASLR).
 - **TPM**: the TPM is a local loopback model, not a real transport.
   `Is_Data_Available` and `Read_From_Transport` honor their timeout
   (ns, `TIMEOUT_INFINITE` = -1 blocks forever, 0 polls): they block until
