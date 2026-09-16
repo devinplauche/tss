@@ -1,0 +1,40 @@
+# processor_uop -- transform stage for the two-UoP round-trip demo.
+#
+# Subscribes to STIMULUS, applies the dummy transform under test
+# (out = 3*in + 7), and publishes each RESULT back. This UoP stands in
+# for the real processing component (the GCI-side UoP in the target
+# system); only its on_stimulus USER CODE region is hand-written.
+#
+# Connection order [STIMULUS, RESULT] matches feeder_uop.yaml, so both
+# UoPs share one <base_port> and their tcp://127.0.0.1 addresses line up.
+uop:
+  name: processor_uop
+  language: c99
+  profile: general_purpose
+
+  types:
+    - name: stimulus
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+    - name: result
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+
+  connections:
+    - name: STIMULUS
+      direction: destination       # this UoP only receives stimuli
+      transport: pubsub
+      role: subscriber
+      type: stimulus
+      callback: on_stimulus
+    - name: RESULT
+      direction: source            # ... and only sends results
+      transport: pubsub
+      role: publisher
+      type: result

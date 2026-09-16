@@ -111,9 +111,13 @@ Every hand-editable spot in the generated code is a region:
 /* USER CODE END: on_raw_detection */
 ```
 
-- Region names: `ctx_fields` (extra context struct fields) plus one per
-  subscriber callback, named by the descriptor's `callback:` value.
-  The harness has one region: `drive`.
+- Region names: `ctx_fields` (extra context struct fields), `startup`
+  (one-shot logic in `main()` after the connections are open and the
+  subscription callbacks are registered, before the run loop — e.g.
+  publish stimulus or read a config file; `ctx` is the struct, not a
+  pointer, there, and `exit_code = 1; goto cleanup;` aborts startup),
+  plus one per subscriber callback, named by the descriptor's `callback:`
+  value. The harness has one region: `drive`.
 - Regeneration extracts region bodies from the existing files and
   re-inserts them **verbatim** — only the marker lines are re-indented,
   so repeated regeneration is byte-stable (no indentation creep).

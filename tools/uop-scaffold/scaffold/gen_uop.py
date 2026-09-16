@@ -91,6 +91,11 @@ def default_regions(model):
     regions = {
         "ctx_fields":
             "/* Add your UoP state fields here. They survive regeneration. */\n",
+        "startup":
+            "/* One-shot logic after connections are open (e.g. publish\n"
+            "   stimulus, read a config file). Runs once before the main\n"
+            "   loop. `ctx` is the context struct (not a pointer) here;\n"
+            "   `exit_code = 1; goto cleanup;` aborts startup on error. */\n",
     }
     for c in model.connections:
         if c.role != "subscriber":
@@ -436,6 +441,9 @@ def emit_uop_c(model, regions):
     running_what = ", ".join(x for x in (sub_names, pub_names) if x)
     L.append(f'    printf("{uop}: running ({running_what})\\n");')
     L.append("    fflush(stdout);")
+    L.append("    /* One-shot USER CODE: connections are open, callbacks are")
+    L.append("       registered, the main loop has not started yet. */")
+    L.append(region("startup", "    "))
     L.append("    while (!g_stop) {")
     L.append("        sleep(1);")
     L.append("    }")

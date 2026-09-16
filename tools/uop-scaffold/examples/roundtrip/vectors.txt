@@ -1,0 +1,9 @@
+# Test vectors for the round-trip demo: seq input expected_output.
+# The transform under test is out = 3*in + 7 (see
+# user_code/processor/uop.on_stimulus.c). The feeder publishes (seq, input)
+# and checks each returned value against expected_output.
+1 10 37
+2 0 7
+3 -5 -8
+4 100 307
+5 -1000 -2993

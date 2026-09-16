@@ -107,6 +107,30 @@ def test_regeneration_preserves_user_code(model):
     assert src3 == src2
 
 
+def test_startup_region_emitted(model):
+    src, orphans = emit_uop_c(model, {})
+    assert orphans == []
+    assert "/* USER CODE BEGIN: startup */" in src
+    # one-shot region runs after the "running" banner, before the main loop
+    banner = src.index(": running (")
+    region = src.index("/* USER CODE BEGIN: startup */")
+    loop = src.index("while (!g_stop) {")
+    assert banner < region < loop
+
+
+def test_startup_region_preserved(model):
+    src1, _ = emit_uop_c(model, {})
+    regions = extract_regions(src1)
+    regions["startup"] = ("    fused_track_t fused;\n"
+                          "    publish_FUSED_TRACK(&ctx, &fused);\n")
+    src2, orphans = emit_uop_c(model, regions)
+    assert orphans == []
+    assert "publish_FUSED_TRACK(&ctx, &fused);" in src2
+    # byte-stable across a second regeneration
+    src3, _ = emit_uop_c(model, extract_regions(src2))
+    assert src3 == src2
+
+
 def test_orphan_regions_reported(model):
     src, orphans = emit_uop_c(model, {"gone_region": "x();\n"})
     assert orphans == ["gone_region"]

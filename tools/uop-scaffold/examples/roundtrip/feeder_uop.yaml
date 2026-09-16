@@ -1,0 +1,40 @@
+# feeder_uop -- test-stimulus source for the two-UoP round-trip demo.
+#
+# Reads test vectors from a file in its `startup` USER CODE region,
+# publishes each as a STIMULUS message, then collects RESULT messages,
+# checks them against the expected values from the file, and exits 0
+# once every vector has round-tripped (exit != 0 on any mismatch).
+#
+# Connection order [STIMULUS, RESULT] matches processor_uop.yaml, so both
+# UoPs share one <base_port> and their tcp://127.0.0.1 addresses line up.
+uop:
+  name: feeder_uop
+  language: c99
+  profile: general_purpose
+
+  types:
+    - name: stimulus
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+    - name: result
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+
+  connections:
+    - name: STIMULUS
+      direction: source            # this UoP only sends stimuli
+      transport: pubsub
+      role: publisher
+      type: stimulus
+    - name: RESULT
+      direction: destination       # ... and only receives results
+      transport: pubsub
+      role: subscriber
+      type: result
+      callback: on_result
