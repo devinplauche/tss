@@ -18,7 +18,9 @@ only hand-written code is the USER CODE regions:
 |---|---|---|
 | `feeder_uop` | `startup` | reads `vectors.txt`, publishes each `(seq, input)` as STIMULUS |
 | `feeder_uop` | `on_result` | checks each RESULT against the file, logs it, exits 0 when all N are in |
+| `feeder_uop` | `shutdown` | writes a `feeder.shutdown.marker` file (proof the region ran) |
 | `processor_uop` | `on_stimulus` | `out = 3*in + 7`, publishes RESULT |
+| `processor_uop` | `shutdown` | writes a `processor.shutdown.marker` file (proof the region ran) |
 
 The two descriptors declare their connections in the same order
 (`STIMULUS`, `RESULT`) with complementary roles, so one shared
@@ -56,6 +58,13 @@ ROUNDTRIP PASS: 5/5 vectors file -> feeder_uop -> TSS -> processor_uop -> TSS ->
   aborts startup on error.
 - The feeder terminates itself with `raise(SIGTERM)` after the last
   result — the generated handler shuts the TSS instance down gracefully.
+- The `shutdown` region runs in both UoPs after the run loop exits but
+  before teardown: the feeder reaches it via its self-`raise(SIGTERM)`,
+  the processor via the orchestrator's `kill -TERM`. Each writes a
+  marker file (`feeder.shutdown.marker` / `processor.shutdown.marker`
+  under `gen/`); `demo.sh` fails if either is missing. This is the
+  lifecycle slot where a real component would offload state to a
+  storage UoP while its connections are still open.
 - `TSS_ROOT` defaults to the tss repo checkout containing this tool
   (`../..` from the scaffolder root); override it when running from a
   standalone copy of the scaffolder.

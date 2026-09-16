@@ -87,10 +87,14 @@ echo "builds clean (-Werror)"
 
 echo "== run round-trip =="
 RESULTS=$GEN/feeder_results.txt
-rm -f "$RESULTS" "$GEN/processor.log" "$GEN/feeder.log"
+FEEDER_MARKER=$GEN/feeder.shutdown.marker
+PROCESSOR_MARKER=$GEN/processor.shutdown.marker
+rm -f "$RESULTS" "$GEN/processor.log" "$GEN/feeder.log" \
+    "$FEEDER_MARKER" "$PROCESSOR_MARKER"
 
 # Processor first: its publishers listen, the feeder's subscribers dial.
-"$GEN/processor/build/processor_uop" "$BASE_PORT" \
+PROCESSOR_MARKER="$PROCESSOR_MARKER" \
+    "$GEN/processor/build/processor_uop" "$BASE_PORT" \
     > "$GEN/processor.log" 2>&1 &
 PROC_PID=$!
 for i in $(seq 1 100); do
@@ -105,6 +109,7 @@ grep -q "processor_uop: running" "$GEN/processor.log" \
 echo "processor up (pid $PROC_PID)"
 
 FEEDER_VECTORS="$HERE/vectors.txt" FEEDER_OUT="$RESULTS" \
+    FEEDER_MARKER="$FEEDER_MARKER" \
     "$GEN/feeder/build/feeder_uop" "$BASE_PORT" \
     > "$GEN/feeder.log" 2>&1 &
 FEED_PID=$!
@@ -137,5 +142,11 @@ NRES=$(wc -l < "$RESULTS" | tr -d ' ')
 if grep -q "MISMATCH" "$RESULTS"; then
     echo "FAIL: mismatches in results:"; grep "MISMATCH" "$RESULTS"; exit 1
 fi
+[ -f "$FEEDER_MARKER" ] || \
+    { echo "FAIL: feeder shutdown region never ran"; exit 1; }
+[ -f "$PROCESSOR_MARKER" ] || \
+    { echo "FAIL: processor shutdown region never ran"; exit 1; }
+echo "shutdown regions ran in both UoPs:"
+cat "$FEEDER_MARKER" "$PROCESSOR_MARKER"
 echo "--- results ---"; cat "$RESULTS"
 echo "ROUNDTRIP PASS: $NRES/$NVEC vectors file -> feeder_uop -> TSS -> processor_uop -> TSS -> feeder_uop, all values match"

@@ -96,6 +96,11 @@ def default_regions(model):
             "   stimulus, read a config file). Runs once before the main\n"
             "   loop. `ctx` is the context struct (not a pointer) here;\n"
             "   `exit_code = 1; goto cleanup;` aborts startup on error. */\n",
+        "shutdown":
+            "/* One-shot logic after the main loop exits, before teardown\n"
+            "   (e.g. offload state: publish a final save message to a\n"
+            "   storage UoP). Connections are still open here; `ctx` is\n"
+            "   the context struct (not a pointer). */\n",
     }
     for c in model.connections:
         if c.role != "subscriber":
@@ -451,6 +456,10 @@ def emit_uop_c(model, regions):
     L.append("           (unsigned long long)ctx.received,")
     L.append("           (unsigned long long)ctx.published,")
     L.append("           (unsigned long long)ctx.errors);")
+    L.append("    /* One-shot USER CODE: the main loop has exited but the")
+    L.append("       connections are still open, so state can still be")
+    L.append("       published/offloaded before teardown. */")
+    L.append(region("shutdown", "    "))
     L.append("")
     L.append("cleanup:")
     L.append("    if (tss_created) {")

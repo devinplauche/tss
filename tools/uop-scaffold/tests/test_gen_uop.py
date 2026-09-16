@@ -131,6 +131,30 @@ def test_startup_region_preserved(model):
     assert src3 == src2
 
 
+def test_shutdown_region_emitted(model):
+    src, orphans = emit_uop_c(model, {})
+    assert orphans == []
+    assert "/* USER CODE BEGIN: shutdown */" in src
+    # one-shot region runs after the "shutting down" banner, before teardown
+    banner = src.index(": shutting down (")
+    region = src.index("/* USER CODE BEGIN: shutdown */")
+    cleanup = src.index("\ncleanup:")
+    assert banner < region < cleanup
+
+
+def test_shutdown_region_preserved(model):
+    src1, _ = emit_uop_c(model, {})
+    regions = extract_regions(src1)
+    regions["shutdown"] = ("    FILE *m = fopen(\"down.marker\", \"w\");\n"
+                           "    if (m) fclose(m);\n")
+    src2, orphans = emit_uop_c(model, regions)
+    assert orphans == []
+    assert 'fopen("down.marker", "w")' in src2
+    # byte-stable across a second regeneration
+    src3, _ = emit_uop_c(model, extract_regions(src2))
+    assert src3 == src2
+
+
 def test_orphan_regions_reported(model):
     src, orphans = emit_uop_c(model, {"gone_region": "x();\n"})
     assert orphans == ["gone_region"]

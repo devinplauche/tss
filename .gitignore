@@ -9,4 +9,4 @@ dist/
 /build*/
 # CTS distribution (large binary, downloaded for local self-testing)
 /cts/
-tools/uop-scaffold/examples/sensor/gen/
+tools/uop-scaffold/examples/*/gen/

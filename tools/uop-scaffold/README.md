@@ -116,6 +116,10 @@ Every hand-editable spot in the generated code is a region:
   subscription callbacks are registered, before the run loop — e.g.
   publish stimulus or read a config file; `ctx` is the struct, not a
   pointer, there, and `exit_code = 1; goto cleanup;` aborts startup),
+  `shutdown` (one-shot logic in `main()` after the run loop exits but
+  before teardown — the connections are still open, so this is where
+  state gets offloaded, e.g. publishing a final save message to a
+  storage UoP; `ctx` is the struct, not a pointer, there too),
   plus one per subscriber callback, named by the descriptor's `callback:`
   value. The harness has one region: `drive`.
 - Regeneration extracts region bodies from the existing files and
