@@ -1,0 +1,45 @@
+# feeder_uop -- test-stimulus source for the full-app demo.
+#
+# Reads test vectors from a file in its `startup` region, publishes each
+# as STIMULUS, then collects RESULT messages. Each RESULT echoes the
+# transform parameters the frontend used, so the feeder recomputes the
+# expectation exactly (no shared schedule with the frontend's GUI
+# actions). Exits 0 once every vector has round-tripped.
+#
+# Connection order [STIMULUS, RESULT] matches frontend_uop.yaml, so both
+# UoPs share one <base_port> and their tcp://127.0.0.1 addresses line up.
+uop:
+  name: feeder_uop
+  language: c99
+  profile: general_purpose
+
+  types:
+    - name: stimulus
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+    - name: result
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+        - name: mult
+          type: int32
+        - name: add
+          type: int32
+
+  connections:
+    - name: STIMULUS
+      direction: source            # this UoP only sends stimuli
+      transport: pubsub
+      role: publisher
+      type: stimulus
+    - name: RESULT
+      direction: destination       # ... and only receives results
+      transport: pubsub
+      role: subscriber
+      type: result
+      callback: on_result

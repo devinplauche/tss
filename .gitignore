@@ -10,3 +10,4 @@ dist/
 # CTS distribution (large binary, downloaded for local self-testing)
 /cts/
 tools/uop-scaffold/examples/*/gen/
+tools/uop-scaffold/examples/*/*.marker

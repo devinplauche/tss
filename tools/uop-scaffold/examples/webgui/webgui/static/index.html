@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frontend UoP — Web GUI</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0;
+         background: #f4f5f7; color: #1c1e21; }
+  header { background: #1c2b4a; color: #fff; padding: 12px 20px;
+           display: flex; align-items: center; gap: 10px; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  #conn { width: 10px; height: 10px; border-radius: 50%;
+          background: #e0245e; display: inline-block; }
+  #conn.on { background: #17bf63; }
+  #conn-label { font-size: 12px; opacity: 0.85; }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 16px;
+         padding: 16px 20px; max-width: 1100px; }
+  .card { background: #fff; border: 1px solid #ddd; border-radius: 8px;
+          padding: 16px; }
+  .card h2 { font-size: 14px; margin: 0 0 12px; text-transform: uppercase;
+             letter-spacing: 0.04em; color: #606770; }
+  .stat { display: flex; justify-content: space-between; padding: 6px 0;
+          border-bottom: 1px solid #eee; font-size: 14px; }
+  .stat:last-child { border-bottom: none; }
+  .stat b { font-variant-numeric: tabular-nums; }
+  label { display: block; font-size: 13px; margin: 8px 0 4px; color: #606770; }
+  input[type=number] { width: 100%; box-sizing: border-box; padding: 8px;
+                      font-size: 15px; border: 1px solid #ccd0d5;
+                      border-radius: 6px; }
+  button { margin-top: 12px; width: 100%; padding: 10px; font-size: 15px;
+           font-weight: 600; color: #fff; background: #1c2b4a; border: none;
+           border-radius: 6px; cursor: pointer; }
+  button:hover { background: #2a3f6b; }
+  button:disabled { background: #bcc0c4; cursor: default; }
+  #log { height: 420px; overflow-y: auto; background: #101418; color: #d5dbe3;
+         border-radius: 6px; padding: 10px 12px; font-family: ui-monospace,
+         SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.55; }
+  #log .dim { color: #7d8590; }
+  #hint { font-size: 12px; color: #606770; margin-top: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <span id="conn"></span>
+  <h1>Frontend UoP — Web GUI</h1>
+  <span id="conn-label">connecting…</span>
+</header>
+<main>
+  <div>
+    <div class="card">
+      <h2>Live parameters</h2>
+      <div class="stat"><span>mult</span><b id="state-mult">–</b></div>
+      <div class="stat"><span>add</span><b id="state-add">–</b></div>
+      <div class="stat"><span>source</span><b id="state-source">–</b></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Apply new parameters</h2>
+      <label for="in-mult">mult</label>
+      <input id="in-mult" type="number" value="7">
+      <label for="in-add">add</label>
+      <input id="in-add" type="number" value="3">
+      <button id="apply">Apply</button>
+      <div id="hint">Apply updates the live RAM state immediately; the
+      next stimulus is transformed with the new parameters.</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Event log</h2>
+    <div id="log"></div>
+  </div>
+</main>
+<script>
+(function () {
+  const log = document.getElementById('log');
+  const conn = document.getElementById('conn');
+  const connLabel = document.getElementById('conn-label');
+
+  function addLine(text, cls) {
+    const div = document.createElement('div');
+    if (cls) div.className = cls;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderState(s) {
+    document.getElementById('state-mult').textContent = s.mult;
+    document.getElementById('state-add').textContent = s.add;
+    document.getElementById('state-source').textContent = s.source;
+  }
+
+  // Belt and braces: fetch current state directly, then stay live via SSE.
+  fetch('/api/state').then(r => r.json()).then(renderState).catch(() => {});
+
+  const es = new EventSource('/events');
+  es.onopen = () => { conn.classList.add('on'); connLabel.textContent = 'live'; };
+  es.onerror = () => { conn.classList.remove('on'); connLabel.textContent = 'reconnecting…'; };
+  es.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === 'log') addLine(msg.text);
+    else if (msg.type === 'state') renderState(msg);
+  };
+
+  const btn = document.getElementById('apply');
+  btn.addEventListener('click', async () => {
+    const mult = parseInt(document.getElementById('in-mult').value, 10);
+    const add = parseInt(document.getElementById('in-add').value, 10);
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mult, add })
+      });
+      const body = await r.json();
+      if (!body.ok) addLine('Apply failed: ' + (body.error || r.status), 'dim');
+    } catch (e) {
+      addLine('Apply failed: ' + e, 'dim');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
