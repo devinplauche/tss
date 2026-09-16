@@ -1,0 +1,84 @@
+# frontend_uop -- the processing system for the full-app demo.
+#
+# This UoP stands in for the GUI front end: it holds the application's
+# live state in RAM (the transform parameters `mult`/`add`), applies it
+# to each STIMULUS, and publishes the RESULT back. A scripted action list
+# drives the same assignments a real toolkit's Apply-button callback
+# would perform (this VM has no display server, so the GUI event loop is
+# a headless stand-in -- the handler logic is what's under test).
+#
+# Persistence is a *standard interface*, not direct file I/O: on startup
+# the frontend loads its parameters from the storage UoP over STORE_REQ /
+# STORE_RESP, and on shutdown it offloads them over STORE_PUT.
+#
+# Address plan: this UoP shares <base_port> with the feeder, so
+# connection index i lands on tcp://127.0.0.1:(base+i):
+#   base+0 STIMULUS    (sub; feeder publishes)
+#   base+1 RESULT      (pub; feeder subscribes)
+#   base+2 STORE_REQ   (pub; storage subscribes)
+#   base+3 STORE_RESP  (sub; storage publishes)
+#   base+4 STORE_PUT   (pub; storage subscribes)
+# The storage UoP runs with base_port = base+2 and declares its three
+# connections in matching order, so every address has exactly one
+# publisher (listener) and one subscriber (dialer).
+uop:
+  name: frontend_uop
+  language: c99
+  profile: general_purpose
+
+  types:
+    - name: stimulus
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+    - name: result
+      fields:
+        - name: seq
+          type: int32
+        - name: value
+          type: int32
+        - name: mult
+          type: int32
+        - name: add
+          type: int32
+    - name: store_req
+      fields:
+        - name: req_id
+          type: int32
+    - name: store_state
+      fields:
+        - name: mult
+          type: int32
+        - name: add
+          type: int32
+
+  connections:
+    - name: STIMULUS
+      direction: destination
+      transport: pubsub
+      role: subscriber
+      type: stimulus
+      callback: on_stimulus
+    - name: RESULT
+      direction: source
+      transport: pubsub
+      role: publisher
+      type: result
+    - name: STORE_REQ
+      direction: source
+      transport: pubsub
+      role: publisher
+      type: store_req
+    - name: STORE_RESP
+      direction: destination
+      transport: pubsub
+      role: subscriber
+      type: store_state
+      callback: on_store_resp
+    - name: STORE_PUT
+      direction: source
+      transport: pubsub
+      role: publisher
+      type: store_state

@@ -1,0 +1,12 @@
+# after_seq mult add -- scripted GUI actions for the full-app demo.
+#
+# Each line is one "Apply" click in the front end: after the RESULT for
+# <after_seq> is published, the user sets the transform parameters to
+# <mult>/<add>. In a real toolkit build these rows are produced by the
+# Apply-button callback; here the demo drives the identical assignments.
+#
+# With seed_state.txt = "7 3": seqs 1-2 use (7,3), seqs 3-4 use (5,1),
+# seq 5 uses (9,-3). The final shutdown offload must therefore store
+# "9 -3".
+2 5 1
+4 9 -3

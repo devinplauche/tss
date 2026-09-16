@@ -1,0 +1,4 @@
+# mult add -- pre-existing external-storage content.
+# The frontend must load exactly these parameters on startup (proving
+# load-from-storage works before any GUI action runs).
+7 3

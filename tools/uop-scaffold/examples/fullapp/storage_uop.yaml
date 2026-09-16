@@ -1,0 +1,45 @@
+# storage_uop -- external-storage backend for the full-app demo.
+#
+# Owns the state backing file (in deployment: network storage) and
+# exposes it *only* through standard UoP interfaces: the frontend
+# loads state via STORE_REQ/STORE_RESP and offloads it via STORE_PUT.
+# Nothing outside this UoP touches the backing file directly.
+#
+# Runs with base_port = <app base>+2 and declares its connections in the
+# order [STORE_REQ, STORE_RESP, STORE_PUT], so connection index i lands
+# on tcp://127.0.0.1:(base+2+i) -- the same addresses the frontend uses.
+uop:
+  name: storage_uop
+  language: c99
+  profile: general_purpose
+
+  types:
+    - name: store_req
+      fields:
+        - name: req_id
+          type: int32
+    - name: store_state
+      fields:
+        - name: mult
+          type: int32
+        - name: add
+          type: int32
+
+  connections:
+    - name: STORE_REQ
+      direction: destination
+      transport: pubsub
+      role: subscriber
+      type: store_req
+      callback: on_store_req
+    - name: STORE_RESP
+      direction: source
+      transport: pubsub
+      role: publisher
+      type: store_state
+    - name: STORE_PUT
+      direction: destination
+      transport: pubsub
+      role: subscriber
+      type: store_state
+      callback: on_store_put
